@@ -1,0 +1,61 @@
+services:
+  vault:
+    image: hashicorp/vault:latest
+    container_name: vltview-vault
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "root"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - ./vault-data:/vault/data
+      - ./vault-init.sh:/vault-init.sh
+    command: server -dev -dev-root-token-id="root"
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - vltview-network
+
+  vault-init:
+    image: hashicorp/vault:latest
+    container_name: vltview-vault-init
+    depends_on:
+      vault:
+        condition: service_healthy
+    environment:
+      VAULT_ADDR: "http://vault:8200"
+      VAULT_TOKEN: "root"
+    volumes:
+      - ./vault-init.sh:/vault-init.sh
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "Waiting for Vault to be ready..."
+        sleep 3
+
+        # Run the comprehensive vault initialization script
+        if [ -f "/vault-init.sh" ]; then
+          chmod +x /vault-init.sh
+          /vault-init.sh
+        else
+          echo "ERROR: vault-init.sh not found!"
+          exit 1
+        fi
+    networks:
+      - vltview-network
+    restart: "no"
+
+networks:
+  vltview-network:
+    driver: bridge
+
+volumes:
+  vault-data:
+    driver: local
