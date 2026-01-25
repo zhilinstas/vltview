@@ -272,10 +272,81 @@ tracing::debug!("API response: {:?}", response);
 tracing::error!("Operation failed: {}", error);
 ```
 
+## Testing with Vault Dev Server
+
+The project includes a complete Docker-based development environment:
+
+```bash
+# Start Vault dev server and initialize with test data
+make docker-up
+./vault-init.sh   # Optional: populate with sample secrets/policies
+
+# The vault-init.sh script creates:
+# - Sample secrets at various paths (secret/myapp/*, secret/test/*)
+# - Test policies (admin, readonly, etc.)
+# - Nested directory structures for testing navigation
+
+# Vault dev server credentials:
+# - Address: http://localhost:8200
+# - Token: root
+```
+
+The docker-compose.yml runs:
+1. `vault` service: HashiCorp Vault in dev mode
+2. `vault-init` service: One-time initialization container
+
+## Async Operation Pattern
+
+The AsyncManager bridges async Vault API calls with the synchronous TUI event loop:
+
+```rust
+// In Root::process_action()
+let app_clone = Arc::clone(&self.app);
+let tx = self.async_manager.action_sender();
+
+self.async_manager.spawn(async move {
+    match app_clone.secret_service().get_secret(&path).await {
+        Ok(data) => {
+            tx.send(Action::SecretLoaded { path, data, metadata }).unwrap();
+        }
+        Err(e) => {
+            tx.send(Action::SetError { message: e.to_string() }).unwrap();
+        }
+    }
+});
+```
+
+Key points:
+- Clone `Arc<App>` before moving into async closure
+- Get `tx` sender before spawning
+- Send completion action (success or error) via channel
+- Main loop polls `async_manager.poll_completions()` to receive actions
+
+## Release Process
+
+GitHub Actions automatically build multi-platform binaries on git tags:
+
+```bash
+# Create and push a version tag
+git tag v0.1.0
+git push origin v0.1.0
+
+# GitHub Actions will:
+# 1. Build for Linux (glibc and musl), macOS (Intel and ARM)
+# 2. Create GitHub release
+# 3. Upload tarballs with SHA256 checksums
+```
+
+Binaries produced:
+- `vltview-linux-amd64.tar.gz` (glibc)
+- `vltview-linux-amd64-musl.tar.gz` (static)
+- `vltview-macos-amd64.tar.gz` (Intel)
+- `vltview-macos-arm64.tar.gz` (Apple Silicon)
+
 ## Security
 
 This application handles sensitive Vault tokens and secrets:
-- Never log tokens or secret values
+- Never log tokens or secret values (check before adding `tracing::debug!`)
 - Use TLS verification by default (`--insecure` flag for dev only, warns user)
 - Clear secrets from memory when possible
 - Clipboard operations should not persist beyond session
