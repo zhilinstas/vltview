@@ -1,6 +1,6 @@
 [package]
 name = "vltview"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 authors = ["VltView Contributors"]
 description = "Terminal UI application for browsing and managing HashiCorp Vault secrets"
