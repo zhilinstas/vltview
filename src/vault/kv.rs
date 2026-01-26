@@ -1,19 +1,22 @@
 use anyhow::Result;
 use reqwest::Client;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use super::audit_log;
 use super::auth::AuthManager;
 use super::response::{FullSecretMetadata, ListResponse, VaultResponse, VaultSecret};
 use super::sanitize::{sanitize_vault_path, sanitize_vault_error};
 
-/// KV Engine API client for KV2 secrets
+/// KV Engine API client for KV2 secrets with rate limiting
 #[derive(Clone)]
 pub struct KvEngine {
     client: Client,
     base_url: String,
     auth: AuthManager,
     namespace: Option<String>,
+    rate_limiter: Arc<Semaphore>,
 }
 
 impl KvEngine {
@@ -23,17 +26,22 @@ impl KvEngine {
         base_url: String,
         auth: AuthManager,
         namespace: Option<String>,
+        rate_limiter: Arc<Semaphore>,
     ) -> Self {
         Self {
             client,
             base_url,
             auth,
             namespace,
+            rate_limiter,
         }
     }
 
     /// List secrets at a path
     pub async fn list(&self, path: &str) -> Result<Vec<String>> {
+        // Acquire rate limit permit
+        let _permit = self.rate_limiter.acquire().await?;
+
         let sanitized_path = sanitize_vault_path(path)?;
         let url = format!("{}/v1/secret/metadata{}", self.base_url, sanitized_path);
 
@@ -63,6 +71,9 @@ impl KvEngine {
 
     /// Get a specific version of a secret
     pub async fn get_version(&self, path: &str, version: Option<u64>) -> Result<VaultSecret> {
+        // Acquire rate limit permit
+        let _permit = self.rate_limiter.acquire().await?;
+
         let sanitized_path = sanitize_vault_path(path)?;
         let url = format!("{}/v1/secret/data{}", self.base_url, sanitized_path);
 
@@ -97,8 +108,15 @@ impl KvEngine {
 
     /// Put (create/update) a secret
     pub async fn put(&self, path: &str, data: HashMap<String, String>) -> Result<()> {
+        // Acquire rate limit permit
+        let _permit = self.rate_limiter.acquire().await?;
+
         let sanitized_path = sanitize_vault_path(path)?;
         let url = format!("{}/v1/secret/data{}", self.base_url, sanitized_path);
+
+        // Redact secret data for logging
+        let redacted_data = audit_log::redact_secret_data(&data);
+        tracing::debug!("Writing secret with keys: {:?}", redacted_data.keys());
 
         let body = serde_json::json!({
             "data": data
@@ -118,6 +136,9 @@ impl KvEngine {
 
     /// Delete a secret (permanently removes all versions and metadata)
     pub async fn delete(&self, path: &str) -> Result<()> {
+        // Acquire rate limit permit
+        let _permit = self.rate_limiter.acquire().await?;
+
         let sanitized_path = sanitize_vault_path(path)?;
         // Use metadata endpoint to permanently delete the secret
         // This removes all versions and metadata, so it won't appear in lists
@@ -145,6 +166,9 @@ impl KvEngine {
 
     /// Get metadata for a secret (all versions)
     pub async fn get_metadata(&self, path: &str) -> Result<FullSecretMetadata> {
+        // Acquire rate limit permit
+        let _permit = self.rate_limiter.acquire().await?;
+
         let sanitized_path = sanitize_vault_path(path)?;
         let url = format!("{}/v1/secret/metadata{}", self.base_url, sanitized_path);
 

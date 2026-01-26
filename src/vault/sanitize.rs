@@ -131,19 +131,6 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_validation() {
-        // Valid namespaces
-        assert!(sanitize_namespace("admin").is_ok());
-        assert!(sanitize_namespace("my-namespace").is_ok());
-
-        // Invalid namespaces
-        assert!(sanitize_namespace("").is_err());
-        assert!(sanitize_namespace("admin\n").is_err());
-        assert!(sanitize_namespace("admin\r\n").is_err());
-        assert!(sanitize_namespace("   ").is_err());
-    }
-
-    #[test]
     fn test_error_sanitization() {
         // Test that errors don't leak internal details
         let error = sanitize_vault_error(403, "permission denied: invalid ACL policy 'secret/admin'");

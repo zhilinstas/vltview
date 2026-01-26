@@ -9,14 +9,6 @@ pub struct AppState {
     /// Current path in Vault
     path: RwLock<PathState>,
 
-    /// Current selection in UI
-    #[allow(dead_code)]
-    selection: RwLock<SelectionState>,
-
-    /// Current view mode
-    #[allow(dead_code)]
-    view: RwLock<ViewState>,
-
     /// Secret cache
     cache: RwLock<CacheManager>,
 
@@ -29,8 +21,6 @@ impl AppState {
     pub fn new(initial_path: String) -> Self {
         Self {
             path: RwLock::new(PathState::new(initial_path)),
-            selection: RwLock::new(SelectionState::new()),
-            view: RwLock::new(ViewState::new()),
             cache: RwLock::new(CacheManager::new()),
             history: RwLock::new(HistoryManager::new()),
         }
@@ -50,26 +40,6 @@ impl AppState {
         // Add to history
         drop(path_state);
         self.history.write().unwrap().push(old_path);
-    }
-
-    /// Get current selection index
-    pub fn selected_index(&self) -> Option<usize> {
-        self.selection.read().unwrap().selected
-    }
-
-    /// Set selection index
-    pub fn set_selection(&self, index: Option<usize>) {
-        self.selection.write().unwrap().selected = index;
-    }
-
-    /// Move selection up
-    pub fn move_selection_up(&self, max: usize) {
-        self.selection.write().unwrap().move_up(max);
-    }
-
-    /// Move selection down
-    pub fn move_selection_down(&self, max: usize) {
-        self.selection.write().unwrap().move_down(max);
     }
 
     /// Invalidate cache for path
@@ -139,113 +109,18 @@ impl PathState {
     }
 }
 
-/// Selection state for UI lists
-#[derive(Debug, Clone)]
-pub struct SelectionState {
-    /// Currently selected index
-    pub selected: Option<usize>,
-}
-
-impl SelectionState {
-    pub fn new() -> Self {
-        Self { selected: Some(0) }
-    }
-
-    /// Move selection up
-    pub fn move_up(&mut self, max: usize) {
-        if max == 0 {
-            self.selected = None;
-            return;
-        }
-
-        self.selected = Some(match self.selected {
-            Some(i) if i > 0 => i - 1,
-            Some(_) => max - 1,
-            None => 0,
-        });
-    }
-
-    /// Move selection down
-    pub fn move_down(&mut self, max: usize) {
-        if max == 0 {
-            self.selected = None;
-            return;
-        }
-
-        self.selected = Some(match self.selected {
-            Some(i) if i < max - 1 => i + 1,
-            Some(_) => 0,
-            None => 0,
-        });
-    }
-}
-
-/// View state for different screens
-#[derive(Debug, Clone)]
-pub struct ViewState {
-    /// Current view mode
-    #[allow(dead_code)]
-    pub mode: ViewMode,
-
-    /// Whether secrets are shown (vs hidden)
-    #[allow(dead_code)]
-    pub secrets_visible: bool,
-}
-
-impl ViewState {
-    pub fn new() -> Self {
-        Self {
-            mode: ViewMode::List,
-            secrets_visible: false,
-        }
-    }
-}
-
-/// View modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ViewMode {
-    /// List view
-    List,
-    /// Detail view
-    Detail,
-    /// Edit view
-    Edit,
-    /// Policy view
-    Policy,
-    /// Help view
-    Help,
-}
 
 /// Cache manager for secrets
 #[derive(Debug)]
 pub struct CacheManager {
-    /// Cache storage
-    cache: HashMap<String, CachedItem>,
-
-    /// Cache TTL
-    #[allow(dead_code)]
-    ttl: Duration,
-
-    /// Max cache size
-    #[allow(dead_code)]
-    max_size: usize,
-}
-
-/// Cached item with timestamp
-#[derive(Debug, Clone)]
-struct CachedItem {
-    #[allow(dead_code)]
-    data: serde_json::Value,
-    #[allow(dead_code)]
-    cached_at: Instant,
+    /// Cache storage (path -> invalidation marker)
+    cache: HashMap<String, ()>,
 }
 
 impl CacheManager {
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
-            ttl: Duration::from_secs(300), // 5 minutes default
-            max_size: 100,
         }
     }
 
@@ -331,44 +206,6 @@ mod tests {
 
         let state3 = PathState::new("/".to_string());
         assert_eq!(state3.current, "/");
-    }
-
-    #[test]
-    fn test_breadcrumbs() {
-        let state = PathState::new("/test/path/deep".to_string());
-        let crumbs = state.breadcrumbs();
-        assert_eq!(crumbs.len(), 4);
-        assert_eq!(crumbs[0], "/");
-        assert_eq!(crumbs[1], "/test");
-        assert_eq!(crumbs[2], "/test/path");
-        assert_eq!(crumbs[3], "/test/path/deep");
-    }
-
-    #[test]
-    fn test_selection_movement() {
-        let mut sel = SelectionState::new();
-        sel.move_down(5);
-        assert_eq!(sel.selected, Some(1));
-
-        sel.move_up(5);
-        assert_eq!(sel.selected, Some(0));
-
-        sel.move_up(5);
-        assert_eq!(sel.selected, Some(4));
-    }
-
-    #[test]
-    fn test_cache() {
-        let mut cache = CacheManager::new();
-        let data = serde_json::json!({"key": "value"});
-
-        cache.insert("/test".to_string(), data.clone());
-        let cached = cache.get("/test");
-        assert!(cached.is_some());
-        assert_eq!(cached.unwrap(), data);
-
-        cache.invalidate("/test");
-        assert!(cache.get("/test").is_none());
     }
 
     #[test]

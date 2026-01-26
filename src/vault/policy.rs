@@ -1,17 +1,20 @@
 use anyhow::Result;
 use reqwest::Client;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use super::audit_log;
 use super::auth::AuthManager;
 use super::sanitize::sanitize_vault_error;
 
-/// Policy API client for ACL policies
+/// Policy API client for ACL policies with rate limiting
 #[derive(Clone)]
 pub struct PolicyApi {
     client: Client,
     base_url: String,
     auth: AuthManager,
     namespace: Option<String>,
+    rate_limiter: Arc<Semaphore>,
 }
 
 impl PolicyApi {
@@ -21,17 +24,22 @@ impl PolicyApi {
         base_url: String,
         auth: AuthManager,
         namespace: Option<String>,
+        rate_limiter: Arc<Semaphore>,
     ) -> Self {
         Self {
             client,
             base_url,
             auth,
             namespace,
+            rate_limiter,
         }
     }
 
     /// List all policies
     pub async fn list(&self) -> Result<Vec<String>> {
+        // Acquire rate limit permit
+        let _permit = self.rate_limiter.acquire().await?;
+
         let url = format!("{}/v1/sys/policies/acl", self.base_url);
 
         // Vault LIST endpoint requires the "LIST" HTTP method
@@ -72,6 +80,9 @@ impl PolicyApi {
 
     /// Read a specific policy
     pub async fn read(&self, name: &str) -> Result<String> {
+        // Acquire rate limit permit
+        let _permit = self.rate_limiter.acquire().await?;
+
         let url = format!("{}/v1/sys/policies/acl/{}", self.base_url, name);
 
         let mut req = self.client.get(&url);

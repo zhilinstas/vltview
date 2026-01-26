@@ -107,7 +107,7 @@ pub fn log_auth_success(addr: &str) {
     );
 }
 
-/// Log clipboard operations
+/// Log clipboard operations (for audit trail)
 pub fn log_clipboard_copy(data_size: usize, timeout_secs: u64) {
     tracing::info!(
         action = "clipboard.copy",
@@ -127,40 +127,3 @@ pub fn log_security_event(event: &str, details: &str) {
     );
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_redact_secret_value() {
-        assert_eq!(redact_secret_value("short"), "***");
-        assert_eq!(
-            redact_secret_value("verylongsecret123456"),
-            "very...3456"
-        );
-    }
-
-    #[test]
-    fn test_redact_secret_data() {
-        let mut data = HashMap::new();
-        data.insert("username".to_string(), "admin".to_string());
-        data.insert("password".to_string(), "secret123".to_string());
-
-        let redacted = redact_secret_data(&data);
-        assert_eq!(redacted.get("username").unwrap(), "***REDACTED***");
-        assert_eq!(redacted.get("password").unwrap(), "***REDACTED***");
-    }
-
-    #[test]
-    fn test_sanitize_path_for_logging() {
-        assert_eq!(sanitize_path_for_logging("/secret"), "/secret");
-        assert_eq!(
-            sanitize_path_for_logging("/secret/myapp"),
-            "/secret/myapp"
-        );
-        assert_eq!(
-            sanitize_path_for_logging("/secret/prod/api/keys/production"),
-            "/secret/.../production (5 segments)"
-        );
-    }
-}

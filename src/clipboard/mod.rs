@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+use crate::vault::audit_log;
+
 /// Default clipboard timeout in seconds
 const DEFAULT_CLIPBOARD_TIMEOUT: u64 = 30;
 
@@ -42,11 +44,8 @@ impl ClipboardManager {
                 .context("Failed to copy text to clipboard")?;
         }
 
-        tracing::info!(
-            "Copied {} bytes to clipboard (auto-clear in {}s)",
-            text_len,
-            timeout_secs
-        );
+        // Log clipboard operation for security audit trail
+        audit_log::log_clipboard_copy(text_len, timeout_secs);
 
         // Schedule automatic clearing
         let clipboard_clone = Arc::clone(&self.clipboard);
@@ -59,9 +58,13 @@ impl ClipboardManager {
             if let Ok(current_text) = clip.get_text() {
                 if current_text == copied_text {
                     let _ = clip.set_text("");
-                    tracing::debug!(
-                        "Clipboard cleared after {} seconds (auto-security)",
+                    tracing::info!(
+                        "Clipboard automatically cleared after {} seconds (security feature)",
                         timeout_secs
+                    );
+                    audit_log::log_security_event(
+                        "clipboard.auto_cleared",
+                        &format!("Clipboard cleared after {}s timeout", timeout_secs)
                     );
                 } else {
                     tracing::debug!(

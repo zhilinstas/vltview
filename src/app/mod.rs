@@ -24,10 +24,6 @@ pub struct App {
     /// Application state
     state: Arc<AppState>,
 
-    /// Configuration
-    #[allow(dead_code)]
-    config: Config,
-
     /// Navigation controller
     navigation: NavigationController,
 
@@ -36,10 +32,6 @@ pub struct App {
 
     /// Policy service
     policy_service: PolicyService,
-
-    /// Filter engine
-    #[allow(dead_code)]
-    filter_engine: FilterEngine,
 }
 
 impl App {
@@ -55,16 +47,13 @@ impl App {
         let navigation = NavigationController::new(Arc::clone(&state), Arc::clone(&vault_client));
         let secret_service = SecretService::new(Arc::clone(&vault_client), Arc::clone(&state));
         let policy_service = PolicyService::new(Arc::clone(&vault_client));
-        let filter_engine = FilterEngine::new();
 
         Ok(Self {
             vault_client,
             state,
-            config,
             navigation,
             secret_service,
             policy_service,
-            filter_engine,
         })
     }
 
@@ -111,17 +100,5 @@ impl App {
         self.state.clear_cache();
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_app_creation() {
-        // This would need proper test setup with mock config
-        // Placeholder for now
-        assert!(true);
     }
 }

@@ -86,29 +86,6 @@ impl AsyncManager {
         op_id
     }
 
-    /// Spawn a simple async operation without error handling
-    ///
-    /// If the future returns an error, it will be logged but not sent as an action.
-    pub fn spawn_simple<F>(&mut self, future: F) -> OperationId
-    where
-        F: Future<Output = Result<Action>> + Send + 'static,
-    {
-        self.spawn(future, |e| {
-            tracing::error!("Async operation failed: {}", e);
-            Action::SetError {
-                message: format!("Operation failed: {}", e),
-            }
-        })
-    }
-
-    /// Send an action directly (useful for components)
-    ///
-    /// This allows components to trigger actions without spawning async tasks.
-    pub fn send_action(&self, action: Action) -> Result<()> {
-        self.action_tx
-            .send(action)
-            .map_err(|e| anyhow::anyhow!("Failed to send action: {}", e))
-    }
 
     /// Poll for completed actions
     ///
@@ -128,16 +105,6 @@ impl AsyncManager {
         actions
     }
 
-    /// Cancel a pending operation
-    ///
-    /// Aborts the async task associated with the given operation ID.
-    /// Note: This is a forceful abort and may leave operations in an inconsistent state.
-    pub fn cancel_operation(&mut self, op_id: OperationId) {
-        if let Some(handle) = self.pending_ops.remove(&op_id) {
-            handle.abort();
-        }
-    }
-
     /// Cancel all pending operations
     ///
     /// Useful when shutting down or switching contexts where pending operations
@@ -146,11 +113,6 @@ impl AsyncManager {
         for (_, handle) in self.pending_ops.drain() {
             handle.abort();
         }
-    }
-
-    /// Get the number of pending operations
-    pub fn pending_count(&self) -> usize {
-        self.pending_ops.len()
     }
 
     /// Allocate a new operation ID
@@ -168,64 +130,3 @@ impl Drop for AsyncManager {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::time::Duration;
-
-    #[tokio::test]
-    async fn test_async_manager_creation() {
-        let handle = tokio::runtime::Handle::current();
-        let manager = AsyncManager::new(handle);
-        assert_eq!(manager.pending_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_send_action() {
-        let handle = tokio::runtime::Handle::current();
-        let manager = AsyncManager::new(handle);
-
-        let result = manager.send_action(Action::Noop);
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_spawn_simple() {
-        let handle = tokio::runtime::Handle::current();
-        let mut manager = AsyncManager::new(handle);
-
-        let _op_id = manager.spawn_simple(async {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            Ok(Action::Noop)
-        });
-
-        assert_eq!(manager.pending_count(), 1);
-
-        // Wait a bit for the operation to complete
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let actions = manager.poll_completions();
-        assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::Noop));
-    }
-
-    #[tokio::test]
-    async fn test_cancel_operation() {
-        let handle = tokio::runtime::Handle::current();
-        let mut manager = AsyncManager::new(handle);
-
-        let op_id = manager.spawn_simple(async {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            Ok(Action::Noop)
-        });
-
-        assert_eq!(manager.pending_count(), 1);
-        manager.cancel_operation(op_id);
-
-        // Wait a bit to ensure cancellation takes effect
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        manager.poll_completions(); // This will clean up finished tasks
-
-        assert_eq!(manager.pending_count(), 0);
-    }
-}

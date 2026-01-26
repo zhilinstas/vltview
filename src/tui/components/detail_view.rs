@@ -328,13 +328,12 @@ impl DetailViewComponent {
             Span::styled(&updated, Style::default().fg(Color::White)),
         ]);
 
-        let metadata = Paragraph::new(Line::from(spans))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Metadata")
-                    .title_style(Style::default().fg(Color::Cyan)),
-            );
+        let metadata = Paragraph::new(Line::from(spans)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Metadata")
+                .title_style(Style::default().fg(Color::Cyan)),
+        );
 
         frame.render_widget(metadata, area);
     }
@@ -416,7 +415,11 @@ impl DetailViewComponent {
         if self.versions.is_empty() {
             let empty = Paragraph::new("No version history available")
                 .style(Style::default().fg(Color::Yellow))
-                .block(Block::default().borders(Borders::ALL).title("Version History"));
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Version History"),
+                );
             frame.render_widget(empty, area);
             return;
         }
@@ -438,7 +441,8 @@ impl DetailViewComponent {
                 };
 
                 // Arrow shows which version is currently being viewed
-                let is_viewing = self.viewing_version
+                let is_viewing = self
+                    .viewing_version
                     .map(|v| v == version.version)
                     .unwrap_or(version.is_current);
 
@@ -451,7 +455,9 @@ impl DetailViewComponent {
                 };
 
                 let status_style = if is_viewing {
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
                 } else if version.is_deleted {
                     Style::default().fg(Color::Red)
                 } else {
@@ -478,11 +484,10 @@ impl DetailViewComponent {
             })
             .collect();
 
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Version History ({} versions)", self.versions.len())),
-        );
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(format!(
+            "Version History ({} versions)",
+            self.versions.len()
+        )));
 
         frame.render_widget(list, area);
     }
@@ -524,13 +529,6 @@ impl DetailViewComponent {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(": History | "),
-                Span::styled(
-                    "Esc",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(": Back | "),
                 status,
             ]),
             DetailMode::Versions => Line::from(vec![
@@ -557,9 +555,7 @@ impl DetailViewComponent {
                 Span::raw(": Back to data | "),
                 Span::styled(
                     "Esc",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(": Close"),
             ]),
@@ -578,11 +574,13 @@ impl Component for DetailViewComponent {
                 // Data mode key handling
                 match (key.code, key.modifiers) {
                     // Navigation
-                    (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
+                    (KeyCode::Char('j'), KeyModifiers::NONE)
+                    | (KeyCode::Down, KeyModifiers::NONE) => {
                         self.move_down();
                         Ok(None)
                     }
-                    (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, KeyModifiers::NONE) => {
+                    (KeyCode::Char('k'), KeyModifiers::NONE)
+                    | (KeyCode::Up, KeyModifiers::NONE) => {
                         self.move_up();
                         Ok(None)
                     }
@@ -593,29 +591,22 @@ impl Component for DetailViewComponent {
                     }
 
                     // Copy selected value
-                    (KeyCode::Char('c'), KeyModifiers::NONE) | (KeyCode::Char('y'), KeyModifiers::NONE) => {
+                    (KeyCode::Char('c'), KeyModifiers::NONE)
+                    | (KeyCode::Char('y'), KeyModifiers::NONE) => {
                         Ok(Some(Action::CopySelectedValue))
                     }
 
                     // Edit secret
-                    (KeyCode::Char('e'), KeyModifiers::NONE) => {
-                        Ok(Some(Action::EditSecret))
-                    }
+                    (KeyCode::Char('e'), KeyModifiers::NONE) => Ok(Some(Action::EditSecret)),
 
                     // Switch to version history
-                    (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                        Ok(Some(Action::ToggleDetailMode))
-                    }
+                    (KeyCode::Char('l'), KeyModifiers::NONE) => Ok(Some(Action::ToggleDetailMode)),
 
                     // Help
-                    (KeyCode::Char('?'), KeyModifiers::NONE) => {
-                        Ok(Some(Action::ToggleHelp))
-                    }
+                    (KeyCode::Char('?'), KeyModifiers::NONE) => Ok(Some(Action::ToggleHelp)),
 
                     // Back (handled by parent)
-                    (KeyCode::Esc, KeyModifiers::NONE) => {
-                        Ok(Some(Action::ScreenBack))
-                    }
+                    (KeyCode::Esc, KeyModifiers::NONE) => Ok(Some(Action::ScreenBack)),
 
                     _ => Ok(None),
                 }
@@ -624,11 +615,13 @@ impl Component for DetailViewComponent {
                 // Versions mode key handling
                 match (key.code, key.modifiers) {
                     // Navigation
-                    (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
+                    (KeyCode::Char('j'), KeyModifiers::NONE)
+                    | (KeyCode::Down, KeyModifiers::NONE) => {
                         self.move_down();
                         Ok(None)
                     }
-                    (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, KeyModifiers::NONE) => {
+                    (KeyCode::Char('k'), KeyModifiers::NONE)
+                    | (KeyCode::Up, KeyModifiers::NONE) => {
                         self.move_up();
                         Ok(None)
                     }
@@ -658,19 +651,13 @@ impl Component for DetailViewComponent {
                     }
 
                     // Back to data mode
-                    (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                        Ok(Some(Action::ToggleDetailMode))
-                    }
+                    (KeyCode::Char('l'), KeyModifiers::NONE) => Ok(Some(Action::ToggleDetailMode)),
 
                     // Help
-                    (KeyCode::Char('?'), KeyModifiers::NONE) => {
-                        Ok(Some(Action::ToggleHelp))
-                    }
+                    (KeyCode::Char('?'), KeyModifiers::NONE) => Ok(Some(Action::ToggleHelp)),
 
                     // ESC goes back to data mode, not close detail view
-                    (KeyCode::Esc, KeyModifiers::NONE) => {
-                        Ok(Some(Action::ToggleDetailMode))
-                    }
+                    (KeyCode::Esc, KeyModifiers::NONE) => Ok(Some(Action::ToggleDetailMode)),
 
                     _ => Ok(None),
                 }

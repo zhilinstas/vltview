@@ -21,18 +21,15 @@ pub use policy::PolicyApi;
 /// Maximum concurrent API requests to Vault
 const MAX_CONCURRENT_REQUESTS: usize = 10;
 
-/// Vault API client
+/// Vault API client with rate limiting and security features
 pub struct VaultClient {
     /// HTTP client
-    #[allow(dead_code)]
     client: Client,
 
     /// Base URL for Vault API
-    #[allow(dead_code)]
     base_url: String,
 
     /// Authentication manager
-    #[allow(dead_code)]
     auth: AuthManager,
 
     /// KV Engine API
@@ -42,11 +39,9 @@ pub struct VaultClient {
     policy: PolicyApi,
 
     /// Optional namespace for Enterprise
-    #[allow(dead_code)]
     namespace: Option<String>,
 
     /// Rate limiter semaphore to prevent API flooding
-    #[allow(dead_code)]
     rate_limiter: Arc<Semaphore>,
 }
 
@@ -71,29 +66,37 @@ impl VaultClient {
         let client = client_builder.build()?;
 
         let base_url = config.base_url();
-        let namespace = config.vault_namespace.clone();
+
+        // Sanitize namespace if provided (Enterprise feature)
+        let namespace = if let Some(ns) = config.vault_namespace.clone() {
+            Some(sanitize::sanitize_namespace(&ns)?)
+        } else {
+            None
+        };
 
         // Initialize auth manager
         let auth = AuthManager::new(config.vault_token.clone());
 
-        // Initialize KV engine
+        // Create rate limiter to prevent API flooding
+        let rate_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
+
+        // Initialize KV engine with rate limiter
         let kv = KvEngine::new(
             client.clone(),
             base_url.clone(),
             auth.clone(),
             namespace.clone(),
+            Arc::clone(&rate_limiter),
         );
 
-        // Initialize policy API
+        // Initialize policy API with rate limiter
         let policy = PolicyApi::new(
             client.clone(),
             base_url.clone(),
             auth.clone(),
             namespace.clone(),
+            Arc::clone(&rate_limiter),
         );
-
-        // Create rate limiter to prevent API flooding
-        let rate_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
 
         tracing::debug!(
             "Vault client initialized with max {} concurrent requests",
@@ -122,6 +125,31 @@ impl VaultClient {
     /// Get reference to Policy API
     pub fn policy(&self) -> &PolicyApi {
         &self.policy
+    }
+
+    /// Get the rate limiter for API throttling
+    pub fn rate_limiter(&self) -> &Arc<Semaphore> {
+        &self.rate_limiter
+    }
+
+    /// Get HTTP client
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
+    /// Get base URL
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Get auth manager
+    pub fn auth(&self) -> &AuthManager {
+        &self.auth
+    }
+
+    /// Get namespace
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
     }
 }
 
