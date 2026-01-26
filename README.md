@@ -13,6 +13,32 @@ Terminal UI application for browsing and managing HashiCorp Vault secrets.
 - Real-time log monitoring
 - Support for Vault Enterprise namespaces
 
+## Screenshots
+
+### Navigation View
+![Navigation View](screenshots/1.png)
+*Browse Vault KV secrets with tree navigation*
+
+### Secret Details
+![Secret Details](screenshots/2.png)
+*View secret keys and values with masked display*
+
+### Edit Secret
+![Edit Secret](screenshots/3.png)
+*Edit secrets with multi-line support*
+
+### Version History
+![Version History](screenshots/4.png)
+*Browse and restore previous secret versions (KV v2)*
+
+### Help Overlay
+![Help Overlay](screenshots/5.png)
+*Quick access to all keyboard shortcuts*
+
+### Application Logs
+![Application Logs](screenshots/6.png)
+*Real-time log monitoring for debugging*
+
 ## Architecture
 
 VltView follows a layered component-based architecture:
