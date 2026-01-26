@@ -1,8 +1,5 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
-use std::time::{Duration, Instant};
-
-use serde::{Deserialize, Serialize};
 
 /// Application state manager
 pub struct AppState {

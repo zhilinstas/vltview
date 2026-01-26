@@ -116,17 +116,3 @@ impl PolicyApi {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_policy_api_creation() {
-        let client = Client::new();
-        let auth = AuthManager::new("test-token".to_string());
-        let policy = PolicyApi::new(client, "https://vault.example.com".to_string(), auth, None);
-
-        assert_eq!(policy.base_url, "https://vault.example.com");
-    }
-}

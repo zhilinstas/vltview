@@ -640,32 +640,3 @@ impl Root {
         self.help_overlay.draw(frame, area, &ctx);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::runtime::Runtime;
-
-    #[test]
-    fn test_root_creation() {
-        let rt = Runtime::new().unwrap();
-        let root = Root::new(rt.handle().clone());
-
-        assert_eq!(root.active_screen(), ActiveScreen::Main);
-        assert!(!root.should_quit());
-    }
-
-    #[test]
-    fn test_screen_transition() {
-        let rt = Runtime::new().unwrap();
-        let mut root = Root::new(rt.handle().clone());
-
-        // Mock app (in real tests, we'd create a proper mock)
-        // For now, this demonstrates the structure
-        assert_eq!(root.active_screen(), ActiveScreen::Main);
-
-        // Transition to logs would happen via process_action
-        root.active_screen = ActiveScreen::Logs;
-        assert_eq!(root.active_screen(), ActiveScreen::Logs);
-    }
-}

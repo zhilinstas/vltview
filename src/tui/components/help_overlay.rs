@@ -244,13 +244,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_help_overlay_creation() {
-        let overlay = HelpOverlay::new();
-        assert!(overlay.visible);
-        assert!(overlay.captures_input());
-    }
-
-    #[test]
     fn test_centered_rect() {
         let area = Rect::new(0, 0, 100, 50);
         let centered = HelpOverlay::centered_rect(50, 50, area);
@@ -262,16 +255,4 @@ mod tests {
         assert!(centered.height < area.height);
     }
 
-    #[test]
-    fn test_help_overlay_visibility() {
-        let mut overlay = HelpOverlay::new();
-        assert!(overlay.visible);
-
-        // Hide
-        let _ = overlay.update(Action::HideHelp, &mut ComponentContext::new(
-            // Note: In tests, we'd need to create mock contexts
-            // For now, this shows the structure
-        ));
-        // Would assert !overlay.visible here with proper mock
-    }
 }

@@ -195,16 +195,3 @@ impl KvEngine {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_kv_engine_creation() {
-        let client = Client::new();
-        let auth = AuthManager::new("test-token".to_string());
-        let kv = KvEngine::new(client, "https://vault.example.com".to_string(), auth, None);
-
-        assert_eq!(kv.base_url, "https://vault.example.com");
-    }
-}

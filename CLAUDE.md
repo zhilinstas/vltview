@@ -109,7 +109,13 @@ HTTP client for Vault API using reqwest + Tokio.
 - `response.rs`: Response parsing and error handling
 - `sanitize.rs`: Path sanitization for Vault API
 
-**Important:** VaultClient uses a semaphore (MAX_CONCURRENT_REQUESTS = 10) to prevent API flooding.
+**Security features:**
+- **Rate limiting**: Semaphore-based (MAX_CONCURRENT_REQUESTS = 10) applied to all KV and Policy API operations
+- **Path sanitization**: `sanitize_vault_path()` prevents path traversal attacks
+- **Namespace sanitization**: `sanitize_namespace()` prevents header injection (Enterprise)
+- **Error sanitization**: `sanitize_vault_error()` prevents information disclosure
+- **Audit logging**: All operations logged via `audit_log` module with redaction of sensitive data
+- **Data redaction**: `redact_secret_data()` shows keys but hides values in logs
 
 ## Key Patterns
 
@@ -343,10 +349,41 @@ Binaries produced:
 - `vltview-macos-amd64.tar.gz` (Intel)
 - `vltview-macos-arm64.tar.gz` (Apple Silicon)
 
-## Security
+## Security Features
 
-This application handles sensitive Vault tokens and secrets:
-- Never log tokens or secret values (check before adding `tracing::debug!`)
+This application implements multiple layers of security for handling Vault secrets:
+
+### Rate Limiting
+All Vault API calls use a semaphore to limit concurrent requests (max 10):
+```rust
+// Automatically applied in KvEngine and PolicyApi
+let _permit = self.rate_limiter.acquire().await?;
+// Make API call
+```
+
+### Input Sanitization
+- **Path sanitization**: Removes `..`, `//`, validates no control characters
+- **Namespace sanitization**: Prevents header injection attacks (`\n`, `\r`)
+- **Error sanitization**: Redacts internal details from user-facing errors
+
+### Audit Logging with Redaction
+All sensitive operations are logged WITHOUT exposing secrets:
+```rust
+// Log secret write - shows key count, not values
+audit_log::log_secret_write(&path, data.len());
+
+// Redact data before logging
+let redacted = audit_log::redact_secret_data(&data); // Shows keys: "***REDACTED***"
+```
+
+### Clipboard Auto-Clear
+Clipboard manager automatically clears copied secrets after 30 seconds:
+- Logs copy operation: `audit_log::log_clipboard_copy(size, timeout)`
+- Verifies content unchanged before clearing (prevents clearing user's own copies)
+- Logs auto-clear events: `audit_log::log_security_event("clipboard.auto_cleared", ...)`
+
+### When Adding New Features
+- **Never log tokens or secret values** - use `audit_log::redact_secret_value()` if needed
+- **Apply rate limiting** to new Vault API operations
+- **Sanitize all user input** going to Vault API
 - Use TLS verification by default (`--insecure` flag for dev only, warns user)
-- Clear secrets from memory when possible
-- Clipboard operations should not persist beyond session
