@@ -136,18 +136,20 @@ impl PolicyScreen {
     // ═══════════════════════════════════════════════════════════════
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
-        let title = Paragraph::new(vec![
-            Line::from(vec![Span::styled(
+        // One row of text: the box around it leaves no more
+        let count = match self.policies.len() {
+            1 => "1 policy".to_string(),
+            count => format!("{count} policies"),
+        };
+        let title = Paragraph::new(Line::from(vec![
+            Span::styled(
                 "🔐 Vault Policies",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(Span::styled(
-                format!("{} policies", self.policies.len()),
-                Style::default().fg(Color::Gray),
-            )),
-        ])
+            ),
+            Span::styled(format!("  {count}"), Style::default().fg(Color::Gray)),
+        ]))
         .block(Block::default().borders(Borders::ALL));
 
         frame.render_widget(title, area);
@@ -260,21 +262,19 @@ impl PolicyScreen {
             _ => ("📄", Color::Cyan),
         };
 
-        let header = Paragraph::new(vec![
-            Line::from(vec![Span::styled(
-                format!("{} Policy Details", icon),
+        // One row of text: the box around it leaves no more
+        let header = Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{icon} Policy "),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(vec![
-                Span::styled("Name: ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    policy_name,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-        ])
+            ),
+            Span::styled(
+                policy_name,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+        ]))
         .block(Block::default().borders(Borders::ALL));
 
         frame.render_widget(header, area);
@@ -862,6 +862,28 @@ mod tests {
             let screen_text = text(screen, ctx);
             crate::tui::components::popup::assert_shown_whole(&screen_text, message);
             assert!(screen_text.contains("Policies (1)"), "{screen_text}");
+        });
+    }
+
+    #[test]
+    fn an_open_policy_says_which_policy_it_is() {
+        // Regression: the header was three rows high with a border, which
+        // leaves one row, and the name was on the second line of its text.
+        with_screen(&["admin", "readonly"], |screen, ctx| {
+            screen.handle_key(key(KeyCode::Down), ctx).unwrap();
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            screen.update(policy_loaded("readonly"), ctx).unwrap();
+
+            let screen_text = text(screen, ctx);
+            let header = screen_text.lines().nth(1).unwrap();
+            assert!(header.contains("Policy readonly"), "{screen_text}");
+        });
+
+        // And the list says how many there are
+        with_screen(&["admin", "readonly"], |screen, ctx| {
+            let screen_text = text(screen, ctx);
+            let header = screen_text.lines().nth(1).unwrap();
+            assert!(header.contains("2 policies"), "{screen_text}");
         });
     }
 }
