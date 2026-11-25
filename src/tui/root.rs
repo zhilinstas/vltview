@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use std::time::{Duration, Instant};
 
@@ -167,6 +167,11 @@ impl Root {
     /// Returns an optional action to be processed. This allows the old Tui
     /// to handle the action if Root doesn't consume it.
     pub fn handle_key_event(&mut self, key: KeyEvent, app: &App) -> Result<Option<Action>> {
+        // Ctrl+C quits from anywhere, at once, whatever has the keyboard
+        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            return Ok(Some(Action::QuitNow));
+        }
+
         let action_tx = self.action_sender();
         let ctx = ComponentContext::new(app, &self.focus, &action_tx);
 
@@ -1598,5 +1603,418 @@ mod tests {
         let mut root = test_root(&app);
         root.process_action(Action::Quit, &mut app).unwrap();
         assert!(root.should_quit());
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Every key in the key table does something where it is hinted
+    // ═══════════════════════════════════════════════════════════════
+
+    use crate::tui::keymap::{self, Context};
+    use crossterm::event::{KeyCode as Code, KeyModifiers as Mods};
+
+    /// The keys a hint in the key table stands for: `j/k ↑/↓` is four keys,
+    /// `Ctrl+s` is one. A spelling this does not know fails the test, so the
+    /// table cannot grow hints that are never pressed.
+    fn keys_of(hint: &str) -> Vec<KeyEvent> {
+        let one = |name: &str| -> KeyEvent {
+            let plain = |code| KeyEvent::new(code, Mods::NONE);
+            match name {
+                "↑" => plain(Code::Up),
+                "↓" => plain(Code::Down),
+                "←" => plain(Code::Left),
+                "→" => plain(Code::Right),
+                "Enter" => plain(Code::Enter),
+                "Esc" => plain(Code::Esc),
+                "Tab" => plain(Code::Tab),
+                "Space" => plain(Code::Char(' ')),
+                "Backspace" => plain(Code::Backspace),
+                "PgUp" => plain(Code::PageUp),
+                "PgDn" => plain(Code::PageDown),
+                "Home" => plain(Code::Home),
+                "End" => plain(Code::End),
+                // Typing, in the filter
+                "type" => plain(Code::Char('s')),
+                "Alt+Enter" => KeyEvent::new(Code::Enter, Mods::ALT),
+                name => {
+                    let mut chars = name.chars();
+                    match (name.strip_prefix("Ctrl+"), chars.next(), chars.next()) {
+                        (Some(letter), _, _) if letter.chars().count() == 1 => {
+                            KeyEvent::new(Code::Char(letter.chars().next().unwrap()), Mods::CONTROL)
+                        }
+                        (None, Some(c), None) if c.is_uppercase() => {
+                            KeyEvent::new(Code::Char(c), Mods::SHIFT)
+                        }
+                        (None, Some(c), None) => plain(Code::Char(c)),
+                        _ => panic!("the test does not know the key {name:?} in {hint:?}"),
+                    }
+                }
+            }
+        };
+
+        if hint == "/" {
+            return vec![one("/")];
+        }
+        hint.split_whitespace()
+            .flat_map(|word| {
+                if word.contains('+') {
+                    vec![word]
+                } else {
+                    word.split('/').collect()
+                }
+            })
+            .map(one)
+            .collect()
+    }
+
+    /// Everything on screen, styles included (a cursor that moves changes
+    /// colours, not text). The spinner is left out: it moves by itself.
+    fn screen_cells(root: &mut Root, app: &App) -> Vec<(String, ratatui::style::Style)> {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| root.render(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| {
+                let symbol = cell.symbol();
+                let spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(symbol) && !symbol.trim().is_empty();
+                let symbol = if spinner { "*" } else { symbol };
+                (symbol.to_string(), cell.style())
+            })
+            .collect()
+    }
+
+    /// Press a key as the event loop does. True if it led to an action,
+    /// changed what is on screen, or quit.
+    fn key_has_an_effect(root: &mut Root, app: &mut App, key: KeyEvent) -> bool {
+        let before = screen_cells(root, app);
+        let action = root.handle_key_event(key, app).unwrap();
+        let acted = action.is_some();
+        match action {
+            // The log buffer is shared by every test in the process
+            Some(Action::ClearLogs) | None => {}
+            Some(action) => root.process_action(action, app).unwrap(),
+        }
+        acted || root.should_quit() || screen_cells(root, app) != before
+    }
+
+    /// Press keys as the event loop does, without looking at the screen
+    fn feed(root: &mut Root, app: &mut App, keys: &[KeyEvent]) {
+        for key in keys {
+            if let Some(action) = root.handle_key_event(*key, app).unwrap() {
+                root.process_action(action, app).unwrap();
+            }
+        }
+    }
+
+    fn plain(code: Code) -> KeyEvent {
+        KeyEvent::new(code, Mods::NONE)
+    }
+
+    fn chars(text: &str) -> Vec<KeyEvent> {
+        text.chars().map(|c| plain(Code::Char(c))).collect()
+    }
+
+    fn times(key: KeyEvent, count: usize) -> Vec<KeyEvent> {
+        vec![key; count]
+    }
+
+    /// A secret with thirty fields, so that a cursor can be in the middle
+    fn big_secret(path: &str, versions: u64) -> Action {
+        use crate::tui::action::{SecretMetadata, VersionInfo};
+        let fields: serde_json::Map<String, serde_json::Value> = (0..30)
+            .map(|i| {
+                (
+                    format!("field_{i:02}"),
+                    serde_json::json!(format!("value {i}")),
+                )
+            })
+            .chain([(
+                "long".to_string(),
+                serde_json::json!((0..200).map(|i| format!("line {i}\n")).collect::<String>()),
+            )])
+            .collect();
+        Action::SecretLoaded {
+            path: path.to_string(),
+            data: fields.into_iter().collect(),
+            metadata: (versions > 0).then(|| SecretMetadata {
+                created_time: "2026-01-20T14:47:07.5Z".to_string(),
+                updated_time: "2026-02-01T09:00:00.5Z".to_string(),
+                current_version: versions,
+                versions: (1..=versions)
+                    .rev()
+                    .map(|version| VersionInfo {
+                        version,
+                        created_time: "2026-01-20T14:47:07.5Z".to_string(),
+                        deleted: false,
+                    })
+                    .collect(),
+            }),
+        }
+    }
+
+    /// An app showing /app with thirty secrets. The keys pressed below
+    /// never change it (no result of a request is delivered), so one app
+    /// serves every screen built from it; building one is slow, because of
+    /// the HTTP client.
+    fn app_with_a_long_list() -> App {
+        let names: Vec<String> = (0..30).map(|i| format!("s{i:02}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        test_app_at("/app", &names)
+    }
+
+    fn then(app: &mut App, mut root: Root, keys: &[KeyEvent]) -> Root {
+        feed(&mut root, app, keys);
+        root
+    }
+
+    fn after(app: &mut App, mut root: Root, action: Action) -> Root {
+        root.process_action(action, app).unwrap();
+        root
+    }
+
+    /// The cursor on /app/s09, that secret loaded
+    fn in_the_list(app: &mut App) -> Root {
+        let mut root = test_root(app);
+        // Draw once, so that paging knows the height of the list
+        screen_cells(&mut root, app);
+        let root = then(app, root, &times(plain(Code::Down), 10));
+        after(app, root, big_secret("/app/s09", 30))
+    }
+
+    /// The same, inside the secret with the cursor on its eleventh field
+    fn in_the_secret(app: &mut App) -> Root {
+        let root = in_the_list(app);
+        let root = then(app, root, &[plain(Code::Enter)]);
+        then(app, root, &times(plain(Code::Down), 10))
+    }
+
+    /// The same, in the editor
+    fn in_the_editor(app: &mut App) -> Root {
+        let root = in_the_secret(app);
+        let root = then(app, root, &chars("e"));
+        then(app, root, &times(plain(Code::Down), 10))
+    }
+
+    /// The editor with one value changed
+    fn with_an_unsaved_change(app: &mut App) -> Root {
+        let root = in_the_editor(app);
+        let keys = [
+            vec![plain(Code::Enter)],
+            chars("x"),
+            vec![plain(Code::Enter)],
+        ]
+        .concat();
+        then(app, root, &keys)
+    }
+
+    fn on_the_policy_screen(app: &mut App) -> Root {
+        let root = in_the_list(app);
+        let root = after(app, root, Action::ShowPolicyScreen);
+        let policies = Action::PoliciesLoaded {
+            policies: (0..40).map(|i| format!("policy-{i:02}")).collect(),
+        };
+        let mut root = after(app, root, policies);
+        screen_cells(&mut root, app);
+        then(app, root, &times(plain(Code::Down), 10))
+    }
+
+    /// The ways to get into `context`. A key passes if it does something
+    /// in at least one of them: `h` focuses the list only from the secret,
+    /// `l` focuses the secret only from the list.
+    fn ways_into(context: Context, app: &mut App) -> Vec<Root> {
+        match context {
+            Context::Global => vec![in_the_list(app), in_the_secret(app)],
+            Context::Navigation => vec![in_the_list(app)],
+            Context::Filter => {
+                let root = in_the_list(app);
+                vec![then(app, root, &chars("/"))]
+            }
+            Context::Filtered => {
+                let root = in_the_list(app);
+                vec![then(
+                    app,
+                    root,
+                    &[chars("/s"), vec![plain(Code::Enter)]].concat(),
+                )]
+            }
+            Context::Secret => vec![in_the_secret(app)],
+            Context::Versions => {
+                let root = in_the_secret(app);
+                let keys = [chars("l"), times(plain(Code::Down), 10)].concat();
+                vec![then(app, root, &keys)]
+            }
+            Context::ValueViewer => {
+                let root = in_the_secret(app);
+                let keys = [
+                    vec![plain(Code::End), plain(Code::Enter)],
+                    times(plain(Code::Down), 40),
+                ]
+                .concat();
+                vec![then(app, root, &keys)]
+            }
+            Context::Edit => vec![in_the_editor(app)],
+            Context::EditField => {
+                let value = in_the_editor(app);
+                let value = then(app, value, &[plain(Code::Enter)]);
+                let name = in_the_editor(app);
+                let name = then(app, name, &chars("r"));
+                vec![value, name]
+            }
+            Context::FieldDeleteConfirm => {
+                let root = in_the_editor(app);
+                vec![then(app, root, &chars("d"))]
+            }
+            Context::CreatePrompt => {
+                let root = in_the_list(app);
+                vec![then(app, root, &chars("n"))]
+            }
+            Context::DeleteConfirm => {
+                let root = in_the_list(app);
+                vec![then(app, root, &chars("d"))]
+            }
+            Context::DiscardConfirm => {
+                let root = with_an_unsaved_change(app);
+                vec![then(app, root, &[plain(Code::Esc)])]
+            }
+            Context::QuitConfirm => {
+                let root = with_an_unsaved_change(app);
+                vec![then(
+                    app,
+                    root,
+                    &[vec![plain(Code::Tab)], chars("q")].concat(),
+                )]
+            }
+            Context::Notice => {
+                let root = in_the_list(app);
+                let failed = Action::DeleteFailed {
+                    path: "/app/s09".to_string(),
+                    message: "Could not delete /app/s09: permission denied".to_string(),
+                };
+                vec![after(app, root, failed)]
+            }
+            Context::LoadError => {
+                let root = in_the_list(app);
+                let root = then(app, root, &[plain(Code::Down)]);
+                vec![after(app, root, failed("/app/s10"))]
+            }
+            Context::Policies => vec![on_the_policy_screen(app)],
+            Context::PolicyContent => {
+                let root = on_the_policy_screen(app);
+                let root = then(app, root, &[plain(Code::Enter)]);
+                let loaded = Action::PolicyLoaded {
+                    name: "policy-10".to_string(),
+                    content: (0..200).map(|i| format!("# line {i}\n")).collect(),
+                };
+                let root = after(app, root, loaded);
+                vec![then(app, root, &times(plain(Code::PageDown), 2))]
+            }
+            Context::Logs => {
+                let root = in_the_list(app);
+                vec![after(app, root, Action::ShowLogScreen)]
+            }
+            Context::Help => {
+                let root = in_the_list(app);
+                let root = after(app, root, Action::ShowHelp);
+                vec![then(app, root, &times(plain(Code::Down), 5))]
+            }
+            // Drawn and handled by the event loop before `Root` exists
+            Context::Connecting => vec![],
+        }
+    }
+
+    #[test]
+    fn the_test_knows_every_key_spelling_in_the_table() {
+        for context in Context::ALL {
+            for binding in keymap::bindings(context) {
+                assert!(!keys_of(binding.keys).is_empty(), "{:?}", binding.keys);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn every_hinted_key_does_something_where_it_is_hinted() {
+        // The key table and the key handling are two pieces of code. This
+        // presses every key of every hint, in the place the hint is shown
+        // for, and fails for a key that does nothing there.
+        let mut app = app_with_a_long_list();
+        let mut pressed = 0;
+        for context in Context::ALL {
+            if context == Context::Connecting {
+                continue;
+            }
+            assert!(
+                !ways_into(context, &mut app).is_empty(),
+                "{context:?} cannot be reached"
+            );
+
+            for binding in keymap::bindings(context) {
+                for key in keys_of(binding.keys) {
+                    let works = ways_into(context, &mut app)
+                        .into_iter()
+                        .any(|mut root| key_has_an_effect(&mut root, &mut app, key));
+                    assert!(
+                        works,
+                        "{context:?}: {:?} ({}) does nothing when {key:?} is pressed",
+                        binding.keys, binding.help
+                    );
+                    pressed += 1;
+                }
+            }
+        }
+        assert!(pressed > 150, "only {pressed} keys were pressed");
+        assert_eq!(
+            app.state().current_path(),
+            "/app",
+            "the app was not to change"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_way_in_shows_the_hints_of_its_context() {
+        // Guards the test above: it only means something if every setup
+        // really is in the context it claims, which the footer shows
+        let mut app = app_with_a_long_list();
+        for context in Context::ALL {
+            // The first hint that is in the footer at all
+            let Some(binding) = keymap::bindings(context)
+                .iter()
+                .find(|binding| binding.footer == 1)
+            else {
+                continue;
+            };
+            let hint = format!("{} {}", binding.keys, binding.label);
+
+            for mut root in ways_into(context, &mut app) {
+                let text = screen_text(&mut root, &app);
+                assert!(text.contains(&hint), "{context:?}: no {hint:?} on\n{text}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_key_that_is_not_bound_is_caught_by_the_same_check() {
+        // The check must be able to fail: `x` does nothing in the list
+        let mut app = app_with_a_long_list();
+        let mut root = in_the_list(&mut app);
+        assert!(!key_has_an_effect(
+            &mut root,
+            &mut app,
+            plain(Code::Char('x'))
+        ));
+        assert!(key_has_an_effect(&mut root, &mut app, plain(Code::Down)));
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_quits_from_anywhere() {
+        let mut app = app_with_a_long_list();
+        for context in Context::ALL {
+            for mut root in ways_into(context, &mut app) {
+                let ctrl_c = KeyEvent::new(Code::Char('c'), Mods::CONTROL);
+                assert!(key_has_an_effect(&mut root, &mut app, ctrl_c));
+                assert!(root.should_quit(), "{context:?}");
+            }
+        }
     }
 }

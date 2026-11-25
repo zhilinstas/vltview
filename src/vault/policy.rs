@@ -1,11 +1,12 @@
-use anyhow::Result;
-use reqwest::Client;
+use anyhow::{Context, Result};
+use reqwest::{Client, RequestBuilder};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use super::audit_log;
 use super::auth::AuthManager;
-use super::sanitize::{sanitize_vault_error, vault_url};
+use super::request::{authorize, ensure_success};
+use super::sanitize::vault_url;
 
 /// Policy API client for ACL policies with rate limiting
 #[derive(Clone)]
@@ -38,6 +39,20 @@ impl PolicyApi {
         }
     }
 
+    /// Add the token and namespace headers
+    fn authorize(&self, req: RequestBuilder) -> RequestBuilder {
+        authorize(req, &self.auth, self.namespace.as_deref())
+    }
+
+    /// The `data` object of a successful answer
+    async fn data(&self, req: RequestBuilder) -> Result<serde_json::Value> {
+        let response = self.authorize(req).send().await?;
+        let response = ensure_success(response).await?;
+        let mut body: serde_json::Value = response.json().await?;
+        self.auth_audit.accepted();
+        Ok(body["data"].take())
+    }
+
     /// List all policies
     pub async fn list(&self) -> Result<Vec<String>> {
         // Acquire rate limit permit
@@ -46,45 +61,22 @@ impl PolicyApi {
         let url = vault_url(&self.base_url, &["v1", "sys", "policies", "acl"], "/")?;
 
         // Vault LIST endpoint requires the "LIST" HTTP method
-        let mut req = self
+        let req = self
             .client
             .request(reqwest::Method::from_bytes(b"LIST")?, url);
-        req = self.auth.add_auth_header(req);
+        let data = self.data(req).await?;
 
-        if let Some(ns) = &self.namespace {
-            req = req.header("X-Vault-Namespace", ns);
-        }
+        // An answer without the list is not "no policies": saying so would
+        // show an empty screen for what is a broken answer
+        let names: Vec<String> = data["keys"]
+            .as_array()
+            .context("Vault's answer holds no policy list")?
+            .iter()
+            .filter_map(|name| name.as_str().map(String::from))
+            .collect();
 
-        let response = req.send().await?;
-
-        if response.status().is_success() {
-            let data: serde_json::Value = response.json().await?;
-            self.auth_audit.accepted();
-
-            // Extract policies list from response (LIST endpoints return "keys")
-            if let Some(policies) = data
-                .get("data")
-                .and_then(|d| d.get("keys"))
-                .and_then(|p| p.as_array())
-            {
-                let policy_names: Vec<String> = policies
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect();
-                audit_log::log_policy_list(policy_names.len());
-                Ok(policy_names)
-            } else {
-                Ok(Vec::new())
-            }
-        } else {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            let sanitized_error = sanitize_vault_error(status.as_u16(), &error_text);
-            anyhow::bail!("{}", sanitized_error);
-        }
+        audit_log::log_policy_list(names.len());
+        Ok(names)
     }
 
     /// Read a specific policy
@@ -94,47 +86,21 @@ impl PolicyApi {
 
         // The name is a single, percent-encoded URL segment
         let url = vault_url(&self.base_url, &["v1", "sys", "policies", "acl", name], "/")?;
+        let data = self.data(self.client.get(url)).await?;
 
-        let mut req = self.client.get(url);
-        req = self.auth.add_auth_header(req);
+        let policy = data["policy"]
+            .as_str()
+            .context("Vault's answer holds no policy text")?;
 
-        if let Some(ns) = &self.namespace {
-            req = req.header("X-Vault-Namespace", ns);
-        }
-
-        let response = req.send().await?;
-
-        if response.status().is_success() {
-            let data: serde_json::Value = response.json().await?;
-            self.auth_audit.accepted();
-
-            // Extract policy content from response
-            if let Some(policy) = data
-                .get("data")
-                .and_then(|d| d.get("policy"))
-                .and_then(|p| p.as_str())
-            {
-                audit_log::log_policy_read(name);
-                Ok(policy.to_string())
-            } else {
-                Ok(String::new())
-            }
-        } else {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            let sanitized_error = sanitize_vault_error(status.as_u16(), &error_text);
-            anyhow::bail!("{}", sanitized_error);
-        }
+        audit_log::log_policy_read(name);
+        Ok(policy.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockito::Server;
+    use mockito::{Server, ServerGuard};
 
     fn api(base_url: String) -> PolicyApi {
         PolicyApi::new(
@@ -164,5 +130,124 @@ mod tests {
 
         mock.assert_async().await;
         assert_eq!(policies, ["default", "readonly"]);
+    }
+
+    async fn server_answering(method: &str, path: &str, status: usize, body: &str) -> ServerGuard {
+        let mut server = Server::new_async().await;
+        server
+            .mock(method, path)
+            .with_status(status)
+            .with_body(body)
+            .create_async()
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn a_refused_or_failed_list_is_an_error_not_an_empty_list() {
+        // An empty result would be shown as "No policies found"
+        for (status, expected) in [
+            (403, "Access denied - insufficient permissions"),
+            (500, "Vault server error - please contact administrator"),
+        ] {
+            let server = server_answering(
+                "LIST",
+                "/v1/sys/policies/acl",
+                status,
+                r#"{"errors":["permission denied"]}"#,
+            )
+            .await;
+
+            let error = api(server.url()).list().await.unwrap_err();
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn read_returns_the_policy_and_sends_the_token() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/sys/policies/acl/readonly")
+            .match_header("X-Vault-Token", "test-token")
+            .with_status(200)
+            .with_body(r#"{"data":{"name":"readonly","policy":"path \"secret/*\" {}"}}"#)
+            .create_async()
+            .await;
+
+        let policy = api(server.url()).read("readonly").await.unwrap();
+
+        mock.assert_async().await;
+        assert_eq!(policy, r#"path "secret/*" {}"#);
+    }
+
+    #[tokio::test]
+    async fn a_refused_or_failed_read_is_an_error_not_an_empty_policy() {
+        for (status, expected) in [
+            (403, "Access denied - insufficient permissions"),
+            (500, "Vault server error - please contact administrator"),
+        ] {
+            let server = server_answering(
+                "GET",
+                "/v1/sys/policies/acl/readonly",
+                status,
+                r#"{"errors":["permission denied"]}"#,
+            )
+            .await;
+
+            let error = api(server.url()).read("readonly").await.unwrap_err();
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_without_the_expected_data_is_an_error() {
+        // 200 with a body that is not what the endpoint returns (a proxy, a
+        // login page turned into JSON): not "no policies" and not an empty
+        // policy
+        let server = server_answering("LIST", "/v1/sys/policies/acl", 200, r#"{"data":{}}"#).await;
+        assert!(api(server.url()).list().await.is_err());
+
+        let server = server_answering(
+            "GET",
+            "/v1/sys/policies/acl/readonly",
+            200,
+            r#"{"data":{}}"#,
+        )
+        .await;
+        assert!(api(server.url()).read("readonly").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_policy_name_cannot_change_which_endpoint_is_called() {
+        // Path and query characters in a name stay inside the one URL
+        // segment that names the policy
+        let mut server = Server::new_async().await;
+        let policy = server
+            .mock(
+                "GET",
+                "/v1/sys/policies/acl/a%2F..%2F..%2Fauth%2Ftoken%3Flist=true%23x",
+            )
+            .with_status(200)
+            .with_body(r#"{"data":{"policy":"ok"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let anything_else = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex("^/v1/(auth|sys/policies/acl\\?)".into()),
+            )
+            .expect(0)
+            .create_async()
+            .await;
+
+        let content = api(server.url())
+            .read("a/../../auth/token?list=true#x")
+            .await
+            .unwrap();
+
+        policy.assert_async().await;
+        anything_else.assert_async().await;
+        assert_eq!(content, "ok");
     }
 }

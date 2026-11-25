@@ -278,10 +278,17 @@ impl Tui {
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
-                            format!("  {}s  (q to quit)", started.elapsed().as_secs()),
+                            format!("  {}s  ", started.elapsed().as_secs()),
                             Style::default().fg(Color::DarkGray),
                         ),
                     ]);
+                    // The keys that work here, from the same table as
+                    // every other footer
+                    let mut line = line;
+                    line.spans.extend(
+                        keymap::footer_line(&[keymap::Context::Connecting], frame.area().width)
+                            .spans,
+                    );
                     frame.render_widget(Paragraph::new(vec![Line::from(""), line]), frame.area());
                 })
                 .map_err(|e| anyhow::anyhow!("Render error: {}", e))?;
@@ -308,14 +315,7 @@ impl Tui {
 
     /// Handle keyboard events
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
-        // Global quit with Ctrl+C (works from anywhere)
-        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
-            self.root
-                .process_action(action::Action::QuitNow, &mut self.app)?;
-            return Ok(());
-        }
-
-        // Route event to root component
+        // Route event to root component (Ctrl+C included)
         if let Some(action) = self.root.handle_key_event(key, &self.app)? {
             // Process the action
             self.process_action(action).await?;

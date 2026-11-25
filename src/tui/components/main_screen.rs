@@ -203,8 +203,12 @@ impl MainScreen {
             return vec![Context::CreatePrompt];
         }
 
-        match self.focused_pane {
-            FocusedPane::Navigation if self.navigation_pane.is_filtering() => vec![Context::Filter],
+        // While the filter is typed it has every key, Esc included
+        if self.focused_pane == FocusedPane::Navigation && self.navigation_pane.is_filtering() {
+            return vec![Context::Filter];
+        }
+
+        let mut contexts = match self.focused_pane {
             FocusedPane::Navigation if !self.navigation_pane.filter_text().is_empty() => {
                 vec![Context::Filtered, Context::Navigation, Context::Global]
             }
@@ -227,7 +231,17 @@ impl MainScreen {
                     vec![Context::Global]
                 }
             }
+        };
+
+        // An error in place of the secret is dismissed with Esc, before
+        // Esc means anything else
+        if self.error_message.is_some()
+            && self.edit_view.is_none()
+            && contexts != [Context::ValueViewer]
+        {
+            contexts.insert(0, Context::LoadError);
         }
+        contexts
     }
 
     /// Handle create secret name input
@@ -401,16 +415,6 @@ impl MainScreen {
                 format!(" {status}"),
                 Style::default().fg(Color::Green),
             ))
-        } else if self.error_message.is_some() && self.edit_view.is_none() {
-            Line::from(vec![
-                Span::styled(
-                    " Esc",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" dismiss", Style::default().fg(Color::Gray)),
-            ])
         } else {
             let mut line =
                 keymap::footer_line(&self.footer_contexts(), area.width.saturating_sub(2));

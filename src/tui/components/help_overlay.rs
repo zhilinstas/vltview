@@ -132,23 +132,17 @@ impl Component for HelpOverlay {
         self.page = inner_height.max(1);
         self.scroll = self.scroll.min(lines.len().saturating_sub(inner_height));
 
-        let key_style = Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
+        // Its own keys come from the table too
         let mut hints = vec![Span::raw(" ")];
+        hints.extend(keymap::footer_line(&[Context::Help], popup.width.saturating_sub(24)).spans);
         if lines.len() > inner_height {
             let last = (self.scroll + inner_height).min(lines.len());
-            hints.extend([
-                Span::styled("j/k PgUp/PgDn", key_style),
-                Span::raw(format!(
-                    " scroll ({}-{} of {})  ",
-                    self.scroll + 1,
-                    last,
-                    lines.len()
-                )),
-            ]);
+            hints.push(Span::styled(
+                format!("  {}-{} of {}", self.scroll + 1, last, lines.len()),
+                Style::default().fg(Color::DarkGray),
+            ));
         }
-        hints.extend([Span::styled("Esc", key_style), Span::raw(" close ")]);
+        hints.push(Span::raw(" "));
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -262,13 +256,15 @@ mod tests {
 
         let first = rendered(&mut overlay, 80, 24).join("\n");
         assert!(first.contains(Context::Global.title()), "{first}");
-        assert!(!first.contains(Context::Logs.title()));
-        assert!(first.contains("scroll (1-20 of"), "{first}");
+        assert!(!first.contains(Context::Connecting.title()));
+        assert!(first.contains("j/k ↑/↓ scroll"), "{first}");
+        assert!(first.contains("Esc/?/q close"), "{first}");
+        assert!(first.contains("1-20 of"), "{first}");
 
         overlay.handle_key(key(KeyCode::End), &ctx).unwrap();
         let last = rendered(&mut overlay, 80, 24).join("\n");
-        assert!(last.contains(Context::Logs.title()), "{last}");
-        assert!(last.contains("Back to the main screen"), "{last}");
+        assert!(last.contains(Context::Connecting.title()), "{last}");
+        assert!(last.contains("Give up and quit"), "{last}");
 
         overlay.handle_key(key(KeyCode::Home), &ctx).unwrap();
         assert_eq!(overlay.scroll, 0);

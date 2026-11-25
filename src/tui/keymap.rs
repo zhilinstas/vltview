@@ -43,17 +43,23 @@ pub enum Context {
     QuitConfirm,
     /// An error message over the main screen
     Notice,
+    /// Content pane saying that the selected secret could not be loaded
+    LoadError,
     /// Policy list
     Policies,
     /// Content of one policy
     PolicyContent,
     /// Log viewer
     Logs,
+    /// The help overlay itself
+    Help,
+    /// Startup screen, while the first folder is being listed
+    Connecting,
 }
 
 impl Context {
     /// Every context, in the order the help overlay lists them
-    pub const ALL: [Context; 18] = [
+    pub const ALL: [Context; 21] = [
         Context::Global,
         Context::Navigation,
         Context::Filter,
@@ -69,9 +75,12 @@ impl Context {
         Context::DiscardConfirm,
         Context::QuitConfirm,
         Context::Notice,
+        Context::LoadError,
         Context::Policies,
         Context::PolicyContent,
         Context::Logs,
+        Context::Help,
+        Context::Connecting,
     ];
 
     /// Section heading in the help overlay
@@ -92,9 +101,12 @@ impl Context {
             Context::DiscardConfirm => "Closing an editor with unsaved changes",
             Context::QuitConfirm => "Quitting with unsaved changes",
             Context::Notice => "An error message",
+            Context::LoadError => "A secret that could not be loaded",
             Context::Policies => "Policy list",
             Context::PolicyContent => "Policy content",
             Context::Logs => "Logs",
+            Context::Help => "This help",
+            Context::Connecting => "While connecting",
         }
     }
 }
@@ -140,7 +152,7 @@ const NAVIGATION: &[Binding] = &[
         0,
     ),
     bind("PgUp/PgDn", "page", "Move one page up / down", 0),
-    bind("g/G", "ends", "Jump to the first / last item", 0),
+    bind("g/G Home/End", "ends", "Jump to the first / last item", 0),
     bind("Enter", "open", "Open the folder, or go into the secret", 1),
     bind("Backspace", "up", "Go to the parent folder", 5),
     bind("b/f", "history", "Go back / forward in history", 0),
@@ -204,6 +216,7 @@ const VALUE_VIEWER: &[Binding] = &[
 
 const EDIT: &[Binding] = &[
     bind("j/k ↑/↓", "move", "Move between fields", 0),
+    bind("PgUp/PgDn g/G", "page", "Page up / down, first / last", 0),
     bind("Enter", "edit", "Edit the selected value (also e)", 1),
     bind("r", "rename", "Rename the selected key", 3),
     bind("a", "add", "Add a field", 2),
@@ -218,6 +231,8 @@ const EDIT: &[Binding] = &[
         1,
     ),
     bind("Tab", "pane", "Switch to the list; the edit stays open", 4),
+    bind("h ←", "list", "Focus the list; the edit stays open", 0),
+    bind("?", "help", "Show this help", 0),
 ];
 
 const EDIT_FIELD: &[Binding] = &[
@@ -275,6 +290,16 @@ const QUIT_CONFIRM: &[Binding] = &[
 
 const NOTICE: &[Binding] = &[bind("Esc", "close", "Close the message (also Enter)", 1)];
 
+const LOAD_ERROR: &[Binding] = &[bind("Esc", "dismiss", "Dismiss the error", 1)];
+
+const HELP: &[Binding] = &[
+    bind("j/k ↑/↓", "scroll", "Scroll", 1),
+    bind("PgUp/PgDn g/G", "page", "Page up / down, top / bottom", 0),
+    bind("Esc/?/q", "close", "Close the help", 1),
+];
+
+const CONNECTING: &[Binding] = &[bind("q", "quit", "Give up and quit (also Ctrl+c)", 1)];
+
 const POLICIES: &[Binding] = &[
     bind("j/k ↑/↓", "move", "Move between policies", 1),
     bind("PgUp/PgDn g/G", "page", "Page up / down, first / last", 0),
@@ -325,9 +350,12 @@ pub fn bindings(context: Context) -> &'static [Binding] {
         Context::DiscardConfirm => DISCARD_CONFIRM,
         Context::QuitConfirm => QUIT_CONFIRM,
         Context::Notice => NOTICE,
+        Context::LoadError => LOAD_ERROR,
         Context::Policies => POLICIES,
         Context::PolicyContent => POLICY_CONTENT,
         Context::Logs => LOGS,
+        Context::Help => HELP,
+        Context::Connecting => CONNECTING,
     }
 }
 

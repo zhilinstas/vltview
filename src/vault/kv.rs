@@ -1,11 +1,12 @@
 use anyhow::Result;
-use reqwest::{Client, RequestBuilder, Response, StatusCode};
+use reqwest::{Client, RequestBuilder, StatusCode};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use super::audit_log;
 use super::auth::AuthManager;
+use super::request::{authorize, ensure_success};
 use super::response::{FullSecretMetadata, ListResponse, VaultResponse, VaultSecret};
 use super::sanitize::{sanitize_vault_error, sanitize_vault_path, vault_url};
 
@@ -62,14 +63,8 @@ impl KvEngine {
     }
 
     /// Add the token and namespace headers
-    fn authorize(&self, mut req: RequestBuilder) -> RequestBuilder {
-        req = self.auth.add_auth_header(req);
-
-        if let Some(ns) = &self.namespace {
-            req = req.header("X-Vault-Namespace", ns);
-        }
-
-        req
+    fn authorize(&self, req: RequestBuilder) -> RequestBuilder {
+        authorize(req, &self.auth, self.namespace.as_deref())
     }
 
     /// List secrets at a path
@@ -219,21 +214,6 @@ impl KvEngine {
         self.auth_audit.accepted();
         Ok(vault_resp.data)
     }
-}
-
-/// Pass a successful response through; turn any other status into a
-/// sanitized error.
-async fn ensure_success(response: Response) -> Result<Response> {
-    if response.status().is_success() {
-        return Ok(response);
-    }
-
-    let status = response.status();
-    let error_text = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "Unknown error".to_string());
-    anyhow::bail!("{}", sanitize_vault_error(status.as_u16(), &error_text));
 }
 
 #[cfg(test)]
