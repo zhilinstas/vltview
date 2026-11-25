@@ -34,6 +34,9 @@ pub struct VaultClient {
 
     /// Optional namespace for Enterprise
     namespace: Option<String>,
+
+    /// False when the client was told not to verify TLS certificates
+    tls_verified: bool,
 }
 
 impl VaultClient {
@@ -105,6 +108,7 @@ impl VaultClient {
             kv,
             policy,
             namespace,
+            tls_verified: !config.insecure,
         })
     }
 
@@ -121,6 +125,11 @@ impl VaultClient {
     /// Get base URL
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Whether TLS certificates are verified (false with `--insecure`)
+    pub fn tls_verified(&self) -> bool {
+        self.tls_verified
     }
 
     /// Get namespace

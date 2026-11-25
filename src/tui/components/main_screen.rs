@@ -322,28 +322,45 @@ impl MainScreen {
         let current_path = ctx.app.state().current_path();
         let vault = ctx.app.vault_client();
 
+        // The right half: activity, a warning that stays for as long as
+        // TLS is not verified, which Vault this is, and the namespace. The
+        // address is the part that gives way when they do not all fit.
+        let spinner = self.is_loading.then(|| format!("{} ", spinner_frame()));
+        let warning = (!vault.tls_verified()).then_some(" TLS NOT VERIFIED ");
+        let namespace = vault.namespace().map(|ns| format!("  ns: {ns}"));
+
+        let fixed = spinner.as_deref().map_or(0, display_width)
+            + warning.map_or(0, |w| w.len() + 1)
+            + namespace.as_deref().map_or(0, display_width)
+            + 1;
+        // A short path leaves its room to the address; a long one keeps
+        // at least a third of the line
+        let path_room = display_width(&current_path).min(area.width as usize / 3);
+        let budget = (area.width as usize).saturating_sub(13 + path_room);
+        let address = truncate(vault.base_url(), budget.saturating_sub(fixed));
+
         let mut right = vec![];
-        if self.is_loading {
-            right.push(Span::styled(
-                format!("{} ", spinner_frame()),
-                Style::default().fg(Color::Yellow),
-            ));
+        if let Some(spinner) = spinner {
+            right.push(Span::styled(spinner, Style::default().fg(Color::Yellow)));
         }
-        right.push(Span::styled(
-            vault.base_url().to_string(),
-            Style::default().fg(Color::Gray),
-        ));
-        if let Some(namespace) = vault.namespace() {
+        if let Some(warning) = warning {
             right.push(Span::styled(
-                format!("  ns: {namespace}"),
-                Style::default().fg(Color::Magenta),
+                warning,
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
             ));
+            right.push(Span::raw(" "));
+        }
+        right.push(Span::styled(address, Style::default().fg(Color::Gray)));
+        if let Some(namespace) = namespace {
+            right.push(Span::styled(namespace, Style::default().fg(Color::Magenta)));
         }
         right.push(Span::raw(" "));
         let right = Line::from(right);
 
-        // The path keeps its room; the address gets what is left
-        let right_width = (right.width() as u16).min(area.width / 2);
+        let right_width = (right.width().min(budget)) as u16;
         let chunks =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).split(area);
 
@@ -2469,5 +2486,45 @@ mod tests {
             let footer = rows(screen, ctx, 80, 24).pop().unwrap();
             assert!(footer.trim_end().ends_with("a name is needed"), "{footer}");
         });
+    }
+
+    #[test]
+    fn the_header_says_for_as_long_as_it_is_true_that_tls_is_not_verified() {
+        // The warning in the footer goes with the first key. This one stays.
+        let header_of = |insecure: bool, vault_addr: &str| {
+            let config = Config {
+                vault_addr: vault_addr.to_string(),
+                vault_token: "test-token".to_string().into(),
+                insecure,
+                ..Config::default()
+            };
+            let app = App::new(config, "/".to_string()).unwrap();
+            let (tx, _rx) = unbounded_channel();
+            let mut ctx = ComponentContext::new(&app, &tx);
+            let mut screen = MainScreen::new();
+            screen.handle_key(key(KeyCode::Down), &ctx).unwrap();
+            screen
+                .update(loaded("/a", json!({"k": "v"})), &mut ctx)
+                .unwrap();
+            rows(&mut screen, &ctx, 80, 24).remove(0)
+        };
+
+        let header = header_of(true, "https://vault.example.com:8200");
+        assert!(header.contains("TLS NOT VERIFIED"), "{header}");
+        assert!(
+            header.contains("https://vault.example.com:8200"),
+            "{header}"
+        );
+
+        // A long address gives way; the warning is never the part cut
+        let header = header_of(
+            true,
+            "https://vault.internal.payments.eu-west-1.example.com:8200",
+        );
+        assert!(header.contains("TLS NOT VERIFIED"), "{header}");
+        assert!(header.contains("https://vault"), "{header}");
+
+        let header = header_of(false, "https://vault.example.com:8200");
+        assert!(!header.contains("TLS"), "{header}");
     }
 }
