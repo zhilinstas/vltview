@@ -1,35 +1,38 @@
+use crate::app::navigation::child_path;
 use crate::tui::action::{Action, FocusedPane};
 use crate::tui::component::Component;
+use crate::tui::components::popup::{border_color, centered, spinner_frame, truncate, wrap};
 use crate::tui::components::{DetailViewComponent, EditViewComponent, NavigationPane};
 use crate::tui::context::{ComponentContext, RenderContext};
+use crate::tui::keymap::{self, Context};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+use ratatui_textarea::{Input, Key, TextArea};
 
-/// Input mode for the main screen
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InputMode {
-    /// Normal navigation mode
-    Normal,
-    /// Filter mode (typing filter text)
-    Filter,
-    /// Create secret name input mode
-    CreateSecret,
+/// A secret waiting for its delete to be confirmed
+struct DeleteTarget {
+    path: String,
+    /// How many versions will be destroyed, when the secret is on screen and
+    /// its history is known
+    versions: Option<usize>,
 }
 
 /// Main screen component with split view (navigation + content)
 ///
 /// This is the primary screen of VltView, showing:
+/// - Header line: where you are, and which Vault this is
 /// - Left pane: NavigationPane for browsing paths/secrets
-/// - Right pane: DetailView, EditView, or empty placeholder
-/// - Header: Current path display
-/// - Footer: Status/shortcuts/input prompts
+/// - Right pane: whatever the navigation cursor is on. A secret is shown in
+///   the DetailView (or the EditView while it is edited); a secret that is
+///   still loading is a placeholder, never the previous secret.
+/// - Footer line: status, prompts, and the keys that work right now
 pub struct MainScreen {
     /// Navigation pane (left side)
     navigation_pane: NavigationPane,
@@ -43,11 +46,11 @@ pub struct MainScreen {
     /// Which pane currently has focus
     focused_pane: FocusedPane,
 
-    /// Input mode
-    input_mode: InputMode,
+    /// Name prompt for a new secret, while it is open
+    create_input: Option<TextArea<'static>>,
 
-    /// New secret name being typed
-    new_secret_name: String,
+    /// Why the typed name was refused
+    create_error: Option<String>,
 
     /// Status message (temporary)
     status_message: Option<String>,
@@ -55,11 +58,25 @@ pub struct MainScreen {
     /// Error message
     error_message: Option<String>,
 
-    /// Loading state
+    /// Whether a request to Vault is in flight
     is_loading: bool,
 
-    /// Delete confirmation - stores the path to delete
-    delete_confirmation: Option<String>,
+    /// Delete confirmation, while it is open
+    delete_confirmation: Option<DeleteTarget>,
+
+    /// Selected secret that is not on screen yet
+    loading_secret: Option<String>,
+
+    /// Secret the user asked to go into before it had loaded; focus moves to
+    /// the content pane when it arrives
+    focus_on_load: Option<String>,
+}
+
+fn name_prompt() -> TextArea<'static> {
+    let mut input = TextArea::default();
+    input.set_cursor_style(Style::default().bg(Color::Green).fg(Color::Black));
+    input.set_cursor_line_style(Style::default());
+    input
 }
 
 impl MainScreen {
@@ -70,12 +87,53 @@ impl MainScreen {
             detail_view: None,
             edit_view: None,
             focused_pane: FocusedPane::Navigation,
-            input_mode: InputMode::Normal,
-            new_secret_name: String::new(),
+            create_input: None,
+            create_error: None,
             status_message: None,
             error_message: None,
             is_loading: false,
             delete_confirmation: None,
+            loading_secret: None,
+            focus_on_load: None,
+        }
+    }
+
+    /// Whether the content pane has something that can take focus
+    fn has_content(&self) -> bool {
+        self.detail_view.is_some() || self.edit_view.is_some()
+    }
+
+    /// The keys that work right now, for the footer
+    fn footer_contexts(&self) -> Vec<Context> {
+        if self.delete_confirmation.is_some() {
+            return vec![Context::DeleteConfirm];
+        }
+        if self.create_input.is_some() {
+            return vec![Context::CreatePrompt];
+        }
+
+        match self.focused_pane {
+            FocusedPane::Navigation if self.navigation_pane.is_filtering() => vec![Context::Filter],
+            FocusedPane::Navigation if !self.navigation_pane.filter_text().is_empty() => {
+                vec![Context::Filtered, Context::Navigation, Context::Global]
+            }
+            FocusedPane::Navigation => vec![Context::Navigation, Context::Global],
+            FocusedPane::Content => {
+                if let Some(edit) = &self.edit_view {
+                    if edit.is_editing() {
+                        vec![Context::EditField]
+                    } else {
+                        vec![Context::Edit]
+                    }
+                } else if let Some(detail) = &self.detail_view {
+                    match detail.context() {
+                        Context::ValueViewer => vec![Context::ValueViewer],
+                        context => vec![context, Context::Global],
+                    }
+                } else {
+                    vec![Context::Global]
+                }
+            }
         }
     }
 
@@ -85,52 +143,57 @@ impl MainScreen {
         key: KeyEvent,
         ctx: &ComponentContext,
     ) -> Result<Option<Action>> {
-        match key.code {
-            KeyCode::Char(c) => {
-                self.new_secret_name.push(c);
-                Ok(None)
-            }
-            KeyCode::Backspace => {
-                self.new_secret_name.pop();
-                Ok(None)
-            }
-            KeyCode::Enter => {
-                let name = self.new_secret_name.trim().to_string();
+        let Some(input) = &mut self.create_input else {
+            return Ok(None);
+        };
+
+        match (key.code, key.modifiers) {
+            (KeyCode::Enter, _) => {
+                let name = input.lines().join("").trim().trim_matches('/').to_string();
                 if name.is_empty() {
-                    self.error_message = Some("Secret name cannot be empty".to_string());
+                    self.create_error = Some("a name is needed".to_string());
                     return Ok(None);
                 }
 
-                // Build full path
-                let current_path = ctx.app.state().current_path();
-                let path = format!("{}/{}", current_path.trim_end_matches('/'), name);
+                // An existing name is not a new secret: saving the empty
+                // editor over it would replace its current version
+                if ctx.app.state().list_items().contains(&name) {
+                    self.create_error = Some(format!("'{name}' already exists"));
+                    return Ok(None);
+                }
 
-                // Exit create mode and emit action
-                self.new_secret_name.clear();
-                self.input_mode = InputMode::Normal;
+                let path = child_path(&ctx.app.state().current_path(), &name);
+
+                self.create_input = None;
+                self.create_error = None;
 
                 Ok(Some(Action::CreateSecret { name: path }))
             }
-            KeyCode::Esc => {
-                self.new_secret_name.clear();
-                self.input_mode = InputMode::Normal;
-                self.error_message = None;
+            (KeyCode::Esc, _) => {
+                self.create_input = None;
+                self.create_error = None;
                 Ok(None)
             }
-            _ => Ok(None),
+            // A name is one line
+            (KeyCode::Char('m'), KeyModifiers::CONTROL)
+            | (KeyCode::Char('j'), KeyModifiers::CONTROL) => Ok(None),
+            _ => {
+                self.create_error = None;
+                input.input(prompt_input(key));
+                Ok(None)
+            }
         }
     }
 
     /// Handle delete confirmation dialog
     fn handle_delete_confirmation(&mut self, key: KeyEvent) -> Result<Option<Action>> {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => {
-                if let Some(path) = self.delete_confirmation.take() {
-                    Ok(Some(Action::DeleteSecret { path }))
-                } else {
-                    Ok(None)
-                }
-            }
+            // Only `y` deletes. Enter is too easy to press by habit for
+            // something that destroys every version.
+            KeyCode::Char('y') => Ok(self
+                .delete_confirmation
+                .take()
+                .map(|target| Action::DeleteSecret { path: target.path })),
             KeyCode::Char('n') | KeyCode::Esc => {
                 self.delete_confirmation = None;
                 Ok(None)
@@ -139,326 +202,265 @@ impl MainScreen {
         }
     }
 
-    /// Render the header
-    fn render_header(frame: &mut Frame, area: Rect, current_path: &str) {
-        let title = Paragraph::new(Line::from(vec![
+    /// Render the header: where you are, and which Vault this is
+    fn render_header(&self, frame: &mut Frame, area: Rect, ctx: &RenderContext) {
+        let current_path = ctx.app.state().current_path();
+        let vault = ctx.app.vault_client();
+
+        let mut right = vec![];
+        if self.is_loading {
+            right.push(Span::styled(
+                format!("{} ", spinner_frame()),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        right.push(Span::styled(
+            vault.base_url().to_string(),
+            Style::default().fg(Color::Gray),
+        ));
+        if let Some(namespace) = vault.namespace() {
+            right.push(Span::styled(
+                format!("  ns: {namespace}"),
+                Style::default().fg(Color::Magenta),
+            ));
+        }
+        right.push(Span::raw(" "));
+        let right = Line::from(right);
+
+        // The path keeps its room; the address gets what is left
+        let right_width = (right.width() as u16).min(area.width / 2);
+        let chunks =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).split(area);
+
+        let path_width = chunks[0].width.saturating_sub(12) as usize;
+        let left = Line::from(vec![
             Span::styled(
-                "⚙️ VltView",
+                " VltView",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" - HashiCorp Vault TUI"),
             Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Path: ", Style::default().fg(Color::Gray)),
-            Span::styled(current_path, Style::default().fg(Color::Green)),
-        ]))
-        .block(Block::default().borders(Borders::ALL));
+            Span::styled(
+                truncate(&current_path, path_width),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
 
-        frame.render_widget(title, area);
+        frame.render_widget(Paragraph::new(left), chunks[0]);
+        frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), chunks[1]);
     }
 
-    /// Render the footer
-    fn render_footer(
-        frame: &mut Frame,
-        area: Rect,
-        focused_pane: FocusedPane,
-        input_mode: InputMode,
-        filter_active: bool,
-        new_secret_name: &str,
-        status_message: &Option<String>,
-    ) {
-        let content = match input_mode {
-            InputMode::CreateSecret => {
-                // Show create secret name input box
-                let mut spans = vec![Span::styled(
-                    "New secret name: ",
+    /// Render the footer: the name prompt, a status message, or key hints
+    fn render_footer(&self, frame: &mut Frame, area: Rect) {
+        if let Some(input) = &self.create_input {
+            let label = " New secret name: ";
+            let hint = match &self.create_error {
+                Some(error) => Span::styled(format!(" {error} "), Style::default().fg(Color::Red)),
+                None => Span::styled(
+                    " Enter create  Esc cancel ",
+                    Style::default().fg(Color::Gray),
+                ),
+            };
+            let hint_width = (hint.width() as u16).min(area.width * 2 / 3);
+            let chunks = Layout::horizontal([
+                Constraint::Length(label.len() as u16),
+                Constraint::Min(8),
+                Constraint::Length(hint_width),
+            ])
+            .split(area);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    label,
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
-                )];
+                )),
+                chunks[0],
+            );
+            frame.render_widget(input, chunks[1]);
+            frame.render_widget(Paragraph::new(hint), chunks[2]);
+            return;
+        }
 
-                if new_secret_name.is_empty() {
-                    spans.push(Span::styled(
-                        " ",
-                        Style::default().fg(Color::Black).bg(Color::Green),
-                    ));
-                } else {
-                    spans.push(Span::styled(
-                        new_secret_name,
-                        Style::default().fg(Color::White),
-                    ));
-                    spans.push(Span::styled(
-                        " ",
-                        Style::default().fg(Color::Black).bg(Color::Green),
-                    ));
-                }
-
-                spans.extend(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        "Enter",
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(": Create | "),
-                    Span::styled(
-                        "Esc",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(": Cancel"),
-                ]);
-
-                Line::from(spans)
-            }
-            InputMode::Filter => {
-                // Filter input is handled by NavigationPane itself
-                // This shouldn't happen, but show a placeholder
-                Line::from(Span::styled(
-                    "Filter mode...",
-                    Style::default().fg(Color::Cyan),
-                ))
-            }
-            InputMode::Normal => {
-                if let Some(status) = status_message {
-                    Line::from(vec![Span::styled(
-                        status,
-                        Style::default().fg(Color::Green),
-                    )])
-                } else {
-                    let focus_indicator = match focused_pane {
-                        FocusedPane::Navigation => Span::styled(
-                            "[NAV]",
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        FocusedPane::Content => Span::styled(
-                            "[CONTENT]",
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    };
-
-                    let mut spans = vec![focus_indicator, Span::raw(" ")];
-
-                    if filter_active {
-                        spans.push(Span::styled(
-                            "🔍 Filter active",
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                        spans.push(Span::raw(" | "));
-                    }
-
-                    spans.extend(vec![
-                        Span::styled(
-                            "n",
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(": New | "),
-                        Span::styled(
-                            "d",
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(": Delete | "),
-                        Span::styled(
-                            "Tab",
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(": Switch | "),
-                        Span::styled(
-                            "?",
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(": Help | "),
-                        Span::styled(
-                            "q",
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(": Quit"),
-                    ]);
-
-                    Line::from(spans)
-                }
-            }
+        let line = if let Some(status) = &self.status_message {
+            Line::from(Span::styled(
+                format!(" {status}"),
+                Style::default().fg(Color::Green),
+            ))
+        } else if self.error_message.is_some() && self.edit_view.is_none() {
+            Line::from(vec![
+                Span::styled(
+                    " Esc",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" dismiss", Style::default().fg(Color::Gray)),
+            ])
+        } else {
+            let mut line =
+                keymap::footer_line(&self.footer_contexts(), area.width.saturating_sub(2));
+            line.spans.insert(0, Span::raw(" "));
+            line
         };
 
-        let footer = Paragraph::new(content).block(Block::default().borders(Borders::ALL));
-        frame.render_widget(footer, area);
+        frame.render_widget(Paragraph::new(line), area);
     }
 
     /// Render the content pane (right side)
-    fn render_content_pane(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        ctx: &RenderContext,
-        error_message: &Option<String>,
-    ) {
-        let border_color = if ctx.is_focused {
-            Color::Cyan
-        } else {
-            Color::DarkGray
-        };
+    fn render_content_pane(&mut self, frame: &mut Frame, area: Rect, ctx: &RenderContext) {
+        let border = Style::default().fg(border_color(ctx.is_focused));
 
-        // Priority: error > edit view > detail view > empty
-        if let Some(error) = error_message {
-            let error_text = vec![
-                Line::from(""),
+        // Priority: edit view > error > detail view > loading > empty.
+        // An edit in progress is never hidden; its errors are shown inside.
+        if let Some(view) = &mut self.edit_view {
+            view.draw(frame, area, ctx);
+        } else if let Some(error) = &self.error_message {
+            let mut text = vec![
                 Line::from(""),
                 Line::from(Span::styled(
                     "Error",
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
-                Line::from(Span::styled(
-                    error.as_str(),
-                    Style::default().fg(Color::Red),
-                )),
-                Line::from(""),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Press Esc to dismiss",
-                    Style::default().fg(Color::Yellow),
-                )),
             ];
-            let error_widget = Paragraph::new(error_text)
+            text.push(Line::from(Span::styled(
+                error.as_str(),
+                Style::default().fg(Color::Red),
+            )));
+            let error_widget = Paragraph::new(text)
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: true })
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Red))
-                        .title("Content"),
+                        .border_style(Style::default().fg(Color::Red)),
                 );
             frame.render_widget(error_widget, area);
-        } else if let Some(view) = &mut self.edit_view {
-            view.draw(frame, area, ctx);
         } else if let Some(view) = &mut self.detail_view {
             view.draw(frame, area, ctx);
+        } else if let Some(path) = &self.loading_secret {
+            // The selected secret is on its way. Showing the previous one
+            // here would put one secret's values under another one's name.
+            let title_width = area.width.saturating_sub(4) as usize;
+            let loading = Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", spinner_frame()),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled("Loading…", Style::default().fg(Color::Gray)),
+            ]))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border)
+                    .title(Span::styled(
+                        format!(" {} ", truncate(path, title_width)),
+                        Style::default().fg(Color::Green),
+                    )),
+            );
+            frame.render_widget(loading, area);
         } else {
-            // Empty content pane
             let empty = Paragraph::new(vec![
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Select a secret to view its contents",
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Press Enter on a secret in the navigation pane",
+                    "Move the cursor to a secret to see it here",
                     Style::default().fg(Color::DarkGray),
                 )),
             ])
             .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border_color))
-                    .title("Content"),
-            );
+            .block(Block::default().borders(Borders::ALL).border_style(border));
             frame.render_widget(empty, area);
         }
     }
 
-    /// Render delete confirmation dialog
-    fn render_delete_confirmation(frame: &mut Frame, area: Rect, item_path: &str) {
-        use ratatui::widgets::Clear;
+    /// Render delete confirmation dialog.
+    ///
+    /// The size is fixed, so the path and the warning are on screen whatever
+    /// the terminal size.
+    fn render_delete_confirmation(frame: &mut Frame, area: Rect, target: &DeleteTarget) {
+        let width = 62;
+        let inner_width = (width.min(area.width) as usize).saturating_sub(4);
+        let path_lines = wrap(&target.path, inner_width);
+        let path_lines = &path_lines[..path_lines.len().min(3)];
 
-        // Calculate centered popup area
-        let popup_area = centered_rect(50, 30, area);
+        let what = match target.versions {
+            Some(1) => "Its only version and its metadata are destroyed.".to_string(),
+            Some(count) => format!("All {count} versions and the metadata are destroyed."),
+            None => "Every version and the metadata are destroyed.".to_string(),
+        };
 
-        // Clear the background
-        frame.render_widget(Clear, popup_area);
+        let key_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // Title
-                Constraint::Min(0),    // Content
-                Constraint::Length(3), // Footer
-            ])
-            .split(popup_area);
-
-        // Title
-        let title = Paragraph::new(Line::from(vec![Span::styled(
-            " Confirm Delete ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )]))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red)),
-        );
-        frame.render_widget(title, chunks[0]);
-
-        // Content
-        let message = vec![
-            Line::from(""),
+        let mut text = vec![Line::from("")];
+        text.extend(path_lines.iter().map(|line| {
             Line::from(Span::styled(
-                "Are you sure you want to delete:",
-                Style::default().fg(Color::White),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                item_path,
+                line.clone(),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
-            )),
+            ))
+        }));
+        text.extend([
             Line::from(""),
+            Line::from(Span::styled(what, Style::default().fg(Color::Red))),
             Line::from(Span::styled(
-                "This action cannot be undone!",
+                "This cannot be undone.",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )),
-        ];
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("y", key_style),
+                Span::raw(" delete   "),
+                Span::styled("n/Esc", key_style),
+                Span::raw(" cancel"),
+            ]),
+        ]);
 
-        let content = Paragraph::new(message).alignment(Alignment::Center).block(
-            Block::default()
-                .borders(Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(Color::Red)),
-        );
-        frame.render_widget(content, chunks[1]);
+        let popup = centered(width, text.len() as u16 + 2, area);
 
-        // Footer
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "y / Enter",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Confirm | "),
-            Span::styled(
-                "n / Esc",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Cancel"),
-        ]))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red)),
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .title(Span::styled(
+                " Delete secret ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .block(block),
+            popup,
         );
-        frame.render_widget(footer, chunks[2]);
+    }
+}
+
+/// Convert a key event for the single-line name prompt
+fn prompt_input(key: KeyEvent) -> Input {
+    let code = match key.code {
+        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        _ => Key::Null,
+    };
+
+    Input {
+        key: code,
+        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+        alt: key.modifiers.contains(KeyModifiers::ALT),
+        shift: key.modifiers.contains(KeyModifiers::SHIFT),
     }
 }
 
@@ -485,7 +487,7 @@ impl Component for MainScreen {
         }
 
         // Handle create secret input mode
-        if self.input_mode == InputMode::CreateSecret {
+        if self.create_input.is_some() {
             return self.handle_create_secret_input(key, ctx);
         }
 
@@ -495,24 +497,36 @@ impl Component for MainScreen {
             return self.navigation_pane.handle_key(key, ctx);
         }
 
-        // If edit view is active and focused, let it handle Tab for mode switching
-        if let Some(edit_view) = &self.edit_view
-            && self.focused_pane == FocusedPane::Content
-        {
-            // When editing a field, EditView captures ALL input
-            if edit_view.is_editing() {
-                return self.edit_view.as_mut().unwrap().handle_key(key, ctx);
+        if self.focused_pane == FocusedPane::Content {
+            // The editor owns the keyboard while it has focus. Global
+            // shortcuts stay off: `q` here must not quit with an edit open.
+            if let Some(edit_view) = &mut self.edit_view {
+                if edit_view.captures_input() {
+                    return edit_view.handle_key(key, ctx);
+                }
+                return match (key.code, key.modifiers) {
+                    (KeyCode::Tab, KeyModifiers::NONE)
+                    | (KeyCode::Left, KeyModifiers::NONE)
+                    | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                        self.focused_pane = FocusedPane::Navigation;
+                        Ok(None)
+                    }
+                    (KeyCode::Char('?'), KeyModifiers::NONE) => Ok(Some(Action::ShowHelp)),
+                    _ => edit_view.handle_key(key, ctx),
+                };
             }
-            // When not editing but EditView is focused, let it handle Tab to start editing
-            if key.code == KeyCode::Tab {
-                return self.edit_view.as_mut().unwrap().handle_key(key, ctx);
+
+            // So does the value viewer
+            if let Some(detail_view) = &mut self.detail_view
+                && detail_view.captures_input()
+            {
+                return detail_view.handle_key(key, ctx);
             }
         }
 
         // Clear errors with Esc
         if key.code == KeyCode::Esc && self.error_message.is_some() {
             self.error_message = None;
-            self.is_loading = false;
             return Ok(None);
         }
 
@@ -540,28 +554,26 @@ impl Component for MainScreen {
             }
             // Switch focus with Tab
             (KeyCode::Tab, KeyModifiers::NONE) => {
-                self.focused_pane = match self.focused_pane {
-                    FocusedPane::Navigation => {
-                        if self.detail_view.is_some() || self.edit_view.is_some() {
-                            FocusedPane::Content
-                        } else {
-                            FocusedPane::Navigation
-                        }
+                match self.focused_pane {
+                    FocusedPane::Navigation if self.has_content() => {
+                        self.focused_pane = FocusedPane::Content;
                     }
-                    FocusedPane::Content => FocusedPane::Navigation,
-                };
+                    FocusedPane::Navigation => {
+                        self.status_message = Some("Select a secret first".to_string());
+                    }
+                    FocusedPane::Content => self.focused_pane = FocusedPane::Navigation,
+                }
                 return Ok(None);
             }
             // Switch focus with arrow keys (left/right)
-            (KeyCode::Left, KeyModifiers::NONE) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
-                if self.focused_pane == FocusedPane::Content {
-                    self.focused_pane = FocusedPane::Navigation;
-                    return Ok(None);
-                }
+            (KeyCode::Left, KeyModifiers::NONE) | (KeyCode::Char('h'), KeyModifiers::NONE)
+                if self.focused_pane == FocusedPane::Content =>
+            {
+                self.focused_pane = FocusedPane::Navigation;
+                return Ok(None);
             }
             (KeyCode::Right, KeyModifiers::NONE) | (KeyCode::Char('l'), KeyModifiers::NONE)
-                if self.focused_pane == FocusedPane::Navigation
-                    && (self.detail_view.is_some() || self.edit_view.is_some()) =>
+                if self.focused_pane == FocusedPane::Navigation && self.has_content() =>
             {
                 self.focused_pane = FocusedPane::Content;
                 return Ok(None);
@@ -572,32 +584,88 @@ impl Component for MainScreen {
         // Route to focused pane
         match self.focused_pane {
             FocusedPane::Navigation => self.navigation_pane.handle_key(key, ctx),
-            FocusedPane::Content => {
-                // Route to edit or detail view
-                if let Some(view) = &mut self.edit_view {
-                    view.handle_key(key, ctx)
-                } else if let Some(view) = &mut self.detail_view {
-                    view.handle_key(key, ctx)
-                } else {
-                    Ok(None)
-                }
-            }
+            FocusedPane::Content => match &mut self.detail_view {
+                Some(view) => view.handle_key(key, ctx),
+                None => Ok(None),
+            },
+        }
+    }
+
+    fn handle_paste(&mut self, text: &str, ctx: &ComponentContext) -> Result<Option<Action>> {
+        // Pasted text goes into the text input that has focus, if there is
+        // one. Anywhere else it is dropped: it must never run as commands.
+        if self.delete_confirmation.is_some() {
+            return Ok(None);
+        }
+
+        if let Some(input) = &mut self.create_input {
+            let line: String = text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect();
+            input.insert_str(line);
+            self.create_error = None;
+            return Ok(None);
+        }
+
+        match self.focused_pane {
+            FocusedPane::Navigation => self.navigation_pane.handle_paste(text, ctx),
+            FocusedPane::Content => match &mut self.edit_view {
+                Some(edit_view) => edit_view.handle_paste(text, ctx),
+                None => Ok(None),
+            },
         }
     }
 
     fn update(&mut self, action: Action, ctx: &mut ComponentContext) -> Result<Option<Action>> {
-        match &action {
+        match action {
             // Focus management
             Action::FocusPane { pane } => {
-                self.focused_pane = *pane;
+                self.focused_pane = match pane {
+                    FocusedPane::Content if !self.has_content() => FocusedPane::Navigation,
+                    pane => pane,
+                };
             }
 
-            // Secret viewing
-            Action::ViewSecret { .. } => {
-                self.is_loading = true;
-                // For now, return the action for Root to handle async loading
-                // In future, MainScreen could use AsyncManager directly
-                return Ok(Some(action));
+            // The cursor is on another item: the content pane follows it
+            Action::SelectionChanged { secret, .. } => {
+                // Moving on cancels a pending Enter; the list catching up
+                // with the secret that is awaited does not
+                if self.focus_on_load != secret {
+                    self.focus_on_load = None;
+                }
+
+                let already_shown = match (&secret, &self.detail_view) {
+                    (Some(path), Some(view)) => view.path() == path,
+                    _ => false,
+                };
+                if !already_shown {
+                    self.detail_view = None;
+                    self.loading_secret = secret;
+                    // Nothing left to have focus on
+                    if self.edit_view.is_none() {
+                        self.focused_pane = FocusedPane::Navigation;
+                    }
+                } else {
+                    self.loading_secret = None;
+                }
+            }
+
+            // Enter on a secret: go into it, as soon as it is there
+            Action::OpenSecret { path } => {
+                let shown = self
+                    .detail_view
+                    .as_ref()
+                    .is_some_and(|view| view.path() == path);
+                if shown || self.edit_view.is_some() {
+                    self.focused_pane = FocusedPane::Content;
+                } else {
+                    self.loading_secret = Some(path.clone());
+                    self.focus_on_load = Some(path);
+                }
             }
 
             Action::SecretLoaded {
@@ -605,19 +673,8 @@ impl Component for MainScreen {
                 data,
                 metadata,
             } => {
-                // Save selected version index if reloading the same secret
-                let saved_version_index = if let Some(existing_detail) = &self.detail_view {
-                    if existing_detail.path() == path {
-                        Some(existing_detail.selected_version_index())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
                 // Create detail view with loaded data
-                let mut detail_view = DetailViewComponent::new(data.clone(), path.clone());
+                let mut detail_view = DetailViewComponent::new(data, path.clone());
 
                 if let Some(meta) = metadata {
                     detail_view.set_metadata(
@@ -640,11 +697,14 @@ impl Component for MainScreen {
                         .collect();
 
                     detail_view.set_versions(versions);
+                }
 
-                    // Restore selected version index if we saved one
-                    if let Some(index) = saved_version_index {
-                        detail_view.set_selected_version_index(index);
-                    }
+                // The same secret reloaded (after a save): keep the cursor
+                // and what was revealed
+                if let Some(previous) = &self.detail_view
+                    && previous.path() == path
+                {
+                    detail_view.adopt_view_state(previous);
                 }
 
                 // The edit view is deliberately left alone: a preview that
@@ -652,7 +712,21 @@ impl Component for MainScreen {
                 // It is closed by `SecretSaved`, or by the user.
                 self.detail_view = Some(detail_view);
                 self.error_message = None;
-                self.is_loading = false;
+                if self.loading_secret.as_deref() == Some(path.as_str()) {
+                    self.loading_secret = None;
+                }
+                if self.focus_on_load.as_deref() == Some(path.as_str()) {
+                    self.focus_on_load = None;
+                    self.focused_pane = FocusedPane::Content;
+                }
+            }
+
+            Action::SecretLoadFailed { path, message } => {
+                if self.loading_secret.as_deref() == Some(path.as_str()) {
+                    self.loading_secret = None;
+                }
+                self.focus_on_load = None;
+                self.error_message = Some(message);
             }
 
             // The write was confirmed by Vault: the edit is done
@@ -663,6 +737,39 @@ impl Component for MainScreen {
                     .is_some_and(|view| view.path() == path)
                 {
                     self.edit_view = None;
+                    if self.detail_view.is_none() {
+                        // A new secret: go into it once it has been read back
+                        self.focus_on_load = Some(path.clone());
+                        self.focused_pane = FocusedPane::Navigation;
+                    }
+                }
+                // The list puts its cursor on it after the reload
+                self.navigation_pane
+                    .update(Action::SecretSaved { path }, ctx)?;
+            }
+
+            // The secret is gone: it must not stay on screen, where it could
+            // be edited and saved back
+            Action::SecretDeleted { path } => {
+                if self
+                    .detail_view
+                    .as_ref()
+                    .is_some_and(|view| view.path() == path)
+                {
+                    self.detail_view = None;
+                }
+                if self
+                    .edit_view
+                    .as_ref()
+                    .is_some_and(|view| view.path() == path)
+                {
+                    self.edit_view = None;
+                }
+                if self.loading_secret.as_deref() == Some(path.as_str()) {
+                    self.loading_secret = None;
+                }
+                if !self.has_content() {
+                    self.focused_pane = FocusedPane::Navigation;
                 }
             }
 
@@ -670,8 +777,12 @@ impl Component for MainScreen {
             Action::EditSecret => {
                 if let Some(detail_view) = &self.detail_view {
                     let path = detail_view.path().to_string();
-                    let data = detail_view.secret_data();
-                    self.edit_view = Some(EditViewComponent::new(path, data));
+                    let mut edit_view = EditViewComponent::new(path, detail_view.secret_data());
+                    // Editing an old version on screen is a restore
+                    if let Some((viewing, current)) = detail_view.old_version() {
+                        edit_view = edit_view.with_restore_note(viewing, current);
+                    }
+                    self.edit_view = Some(edit_view);
                     // Keep detail_view so we can restore it on cancel
                     self.focused_pane = FocusedPane::Content;
                 }
@@ -680,39 +791,16 @@ impl Component for MainScreen {
             // Cancel edit is handled by EditView itself
             // If EditView is not editing, it emits ScreenBack to close
             Action::CancelEdit => {
-                // Pass to EditView, it will handle cancel properly
                 if let Some(view) = &mut self.edit_view
-                    && let Some(action) = view.update(action.clone(), ctx)?
+                    && let Some(Action::ScreenBack) = view.update(Action::CancelEdit, ctx)?
                 {
-                    // EditView wants to close (returned ScreenBack)
-                    // Process it here to close edit view and show detail view
-                    if matches!(action, Action::ScreenBack) {
-                        self.edit_view = None;
-                        // Keep detail_view visible, focus on it
-                        if self.detail_view.is_some() {
-                            self.focused_pane = FocusedPane::Content;
-                        } else {
-                            self.focused_pane = FocusedPane::Navigation;
-                        }
-                    }
+                    self.edit_view = None;
+                    self.focused_pane = if self.detail_view.is_some() {
+                        FocusedPane::Content
+                    } else {
+                        FocusedPane::Navigation
+                    };
                 }
-            }
-
-            // Copy selected value from detail view
-            Action::CopySelectedValue => {
-                if let Some(detail_view) = &self.detail_view
-                    && let Some(value) = detail_view.selected_value()
-                {
-                    return Ok(Some(Action::CopyToClipboard {
-                        text: value.to_string(),
-                    }));
-                }
-            }
-
-            // View specific secret version - pass to Root to spawn async load
-            Action::ViewSecretVersion { .. } => {
-                self.is_loading = true;
-                return Ok(Some(action));
             }
 
             // Secret version loaded successfully
@@ -727,57 +815,62 @@ impl Component for MainScreen {
                 if let Some(detail_view) = &mut self.detail_view
                     && detail_view.path() == path
                 {
-                    detail_view.load_version(*version, data.clone());
+                    detail_view.load_version(version, data);
                 }
-                self.is_loading = false;
             }
 
-            // Create new version from historical version - pass to Root to load
-            Action::CreateFromVersion { .. } => {
-                self.is_loading = true;
-                return Ok(Some(action));
-            }
-
-            // Version loaded for editing (create from old version)
-            Action::VersionLoadedForEdit { path, data } => {
+            // Version loaded for editing (create new from old version)
+            Action::VersionLoadedForEdit {
+                path,
+                version,
+                data,
+            } => {
                 // Only open the editor if the user is still on that secret
                 // and has not started another edit in the meantime.
-                let still_viewing = self
-                    .detail_view
-                    .as_ref()
-                    .is_some_and(|view| view.path() == path);
-                if still_viewing && self.edit_view.is_none() {
-                    self.edit_view = Some(EditViewComponent::new(path.clone(), data.clone()));
+                if let Some(detail_view) = &self.detail_view
+                    && detail_view.path() == path
+                    && self.edit_view.is_none()
+                {
+                    let mut edit_view = EditViewComponent::new(path, data);
+                    if let Some(current) = detail_view.current_version()
+                        && current != version
+                    {
+                        edit_view = edit_view.with_restore_note(version, current);
+                    }
+                    self.edit_view = Some(edit_view);
                     self.focused_pane = FocusedPane::Content;
                 }
-                self.is_loading = false;
             }
 
             // Create secret
             Action::CreateSecret { name } => {
-                self.edit_view = Some(EditViewComponent::new_secret(name.clone()));
+                self.edit_view = Some(EditViewComponent::new_secret(name));
                 self.detail_view = None;
+                self.loading_secret = None;
                 self.focused_pane = FocusedPane::Content;
             }
 
-            // Save secret - pass through to Root which will handle async save
-            Action::SaveSecret { .. } => {
-                // Root will handle the async save operation
-            }
-
             Action::ShowCreateSecretInput => {
-                self.input_mode = InputMode::CreateSecret;
-                self.new_secret_name.clear();
+                self.create_input = Some(name_prompt());
+                self.create_error = None;
             }
 
             Action::HideCreateSecretInput => {
-                self.input_mode = InputMode::Normal;
-                self.new_secret_name.clear();
+                self.create_input = None;
+                self.create_error = None;
             }
 
             // Delete confirmation
             Action::ShowDeleteConfirmation { item_name } => {
-                self.delete_confirmation = Some(item_name.clone());
+                let versions = self
+                    .detail_view
+                    .as_ref()
+                    .filter(|view| view.path() == item_name)
+                    .and_then(|view| view.version_count());
+                self.delete_confirmation = Some(DeleteTarget {
+                    path: item_name,
+                    versions,
+                });
             }
 
             Action::HideConfirmation => {
@@ -786,7 +879,7 @@ impl Component for MainScreen {
 
             // Status/error messages
             Action::SetStatus { message } => {
-                self.status_message = Some(message.clone());
+                self.status_message = Some(message);
             }
 
             Action::ClearStatus => {
@@ -794,8 +887,12 @@ impl Component for MainScreen {
             }
 
             Action::SetError { message } => {
-                self.error_message = Some(message.clone());
-                self.is_loading = false;
+                // With an edit open the error is shown inside it, so the
+                // fields being edited stay on screen
+                match &mut self.edit_view {
+                    Some(edit_view) => edit_view.set_error(Some(message)),
+                    None => self.error_message = Some(message),
+                }
             }
 
             Action::ClearError => {
@@ -803,96 +900,38 @@ impl Component for MainScreen {
             }
 
             Action::SetLoading { loading } => {
-                self.is_loading = *loading;
+                self.is_loading = loading;
             }
 
-            // Filter mode tracking
-            Action::StartFilter => {
-                self.input_mode = InputMode::Filter;
-            }
-
-            Action::ConfirmFilter | Action::CancelFilter => {
-                self.input_mode = InputMode::Normal;
-            }
-
-            // Navigation actions - propagate to navigation pane
-            Action::Refresh
-            | Action::StateUpdated
-            | Action::NavigateTo { .. }
-            | Action::NavigateUp
-            | Action::UpdateFilter { .. } => {
-                self.navigation_pane.update(action.clone(), ctx)?;
-            }
-
-            // Close detail/edit views
-            Action::ScreenBack => {
-                if self.edit_view.is_some() {
-                    self.edit_view = None;
-                    self.focused_pane = FocusedPane::Navigation;
-                } else if self.detail_view.is_some() {
-                    self.detail_view = None;
-                    self.focused_pane = FocusedPane::Navigation;
-                }
+            // A folder was loaded: the list follows, and tells us if that
+            // moved the cursor to another item
+            Action::StateUpdated => {
+                return self.navigation_pane.update(Action::StateUpdated, ctx);
             }
 
             _ => {}
-        }
-
-        // Update child components (but don't broadcast everything)
-        // Navigation pane only needs navigation-related actions
-        match &action {
-            Action::Refresh
-            | Action::StateUpdated
-            | Action::NavigateTo { .. }
-            | Action::NavigateUp
-            | Action::HistoryBack
-            | Action::HistoryForward
-            | Action::UpdateFilter { .. }
-            | Action::CancelFilter
-            | Action::ConfirmFilter
-            | Action::StartFilter
-            | Action::SelectNext
-            | Action::SelectPrevious => {
-                self.navigation_pane.update(action.clone(), ctx)?;
-            }
-            _ => {}
-        }
-
-        // Content views get their relevant actions
-        if let Some(view) = &mut self.detail_view {
-            view.update(action.clone(), ctx)?;
-        }
-
-        if let Some(view) = &mut self.edit_view {
-            view.update(action, ctx)?;
         }
 
         Ok(None)
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &RenderContext) {
-        // Main layout: header, content, footer
-        let main_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // Header
-                Constraint::Min(0),    // Content (split view)
-                Constraint::Length(3), // Footer
-            ])
-            .split(area);
+        // One line each for the header and the footer; the panes get the rest
+        let main_chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
 
-        // Render header
-        let current_path = ctx.app.state().current_path();
-        Self::render_header(frame, main_chunks[0], &current_path);
+        self.render_header(frame, main_chunks[0], ctx);
 
         // Split content area into two columns
-        let content_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(35), // Left: Navigation
-                Constraint::Percentage(65), // Right: Content
-            ])
-            .split(main_chunks[1]);
+        let content_chunks = Layout::horizontal([
+            Constraint::Percentage(35), // Left: Navigation
+            Constraint::Percentage(65), // Right: Content
+        ])
+        .split(main_chunks[1]);
 
         // Render navigation pane (left)
         let nav_ctx = RenderContext::new(
@@ -911,53 +950,20 @@ impl Component for MainScreen {
             self.focused_pane == FocusedPane::Content,
             content_chunks[1],
         );
-        let error_message = self.error_message.clone();
-        self.render_content_pane(frame, content_chunks[1], &content_ctx, &error_message);
+        self.render_content_pane(frame, content_chunks[1], &content_ctx);
 
-        // Render footer
-        // Check if navigation pane has active filter
-        let filter_active = false; // TODO: expose from NavigationPane
-        Self::render_footer(
-            frame,
-            main_chunks[2],
-            self.focused_pane,
-            self.input_mode,
-            filter_active,
-            &self.new_secret_name,
-            &self.status_message,
-        );
+        self.render_footer(frame, main_chunks[2]);
 
         // Render delete confirmation dialog if active
-        if let Some(ref item_path) = self.delete_confirmation {
-            Self::render_delete_confirmation(frame, area, item_path);
+        if let Some(target) = &self.delete_confirmation {
+            Self::render_delete_confirmation(frame, area, target);
         }
     }
 
     fn captures_input(&self) -> bool {
         // Capture input when in create secret mode or delete confirmation
-        self.input_mode == InputMode::CreateSecret || self.delete_confirmation.is_some()
+        self.create_input.is_some() || self.delete_confirmation.is_some()
     }
-}
-
-/// Calculate a centered rectangle of given percentage size
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
 }
 
 #[cfg(test)]
@@ -965,8 +971,10 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::config::Config;
+    use crate::tui::action::{SecretMetadata, SelectionSource, VersionInfo};
     use crate::tui::context::FocusState;
     use crate::vault::SecretData;
+    use ratatui::{Terminal, backend::TestBackend};
     use serde_json::json;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -995,6 +1003,33 @@ mod tests {
         }
     }
 
+    fn loaded_with_versions(path: &str, versions: u64) -> Action {
+        Action::SecretLoaded {
+            path: path.to_string(),
+            data: secret(json!({"k": "v"})),
+            metadata: Some(SecretMetadata {
+                created_time: "2026-01-20T14:47:07.5Z".to_string(),
+                updated_time: "2026-02-01T09:00:00.5Z".to_string(),
+                current_version: versions,
+                versions: (1..=versions)
+                    .rev()
+                    .map(|version| VersionInfo {
+                        version,
+                        created_time: "2026-01-20T14:47:07.5Z".to_string(),
+                        deleted: false,
+                    })
+                    .collect(),
+            }),
+        }
+    }
+
+    fn selected(path: Option<&str>) -> Action {
+        Action::SelectionChanged {
+            secret: path.map(str::to_string),
+            source: SelectionSource::Cursor,
+        }
+    }
+
     /// Run `body` with a screen and the context components expect
     fn with_screen(body: impl FnOnce(&mut MainScreen, &mut ComponentContext)) {
         let app = test_app();
@@ -1005,6 +1040,36 @@ mod tests {
         body(&mut screen, &mut ctx);
     }
 
+    /// Rows on screen after drawing at the given terminal size
+    fn rows(
+        screen: &mut MainScreen,
+        ctx: &ComponentContext,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let render_ctx = RenderContext::new(ctx.app, ctx.focus, true, area);
+                screen.draw(frame, area, &render_ctx);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn text(screen: &mut MainScreen, ctx: &ComponentContext, width: u16, height: u16) -> String {
+        rows(screen, ctx, width, height).join("\n")
+    }
+
     #[test]
     fn filter_typing_does_not_trigger_global_shortcuts() {
         // Regression: with the filter open, "q" quit the app, "p" opened the
@@ -1012,26 +1077,26 @@ mod tests {
         with_screen(|screen, ctx| {
             screen.update(loaded("/a", json!({"k": "v"})), ctx).unwrap();
 
-            let action = screen.handle_key(key(KeyCode::Char('/')), ctx).unwrap();
-            assert!(matches!(action, Some(Action::StartFilter)));
-            screen.update(Action::StartFilter, ctx).unwrap();
+            screen.handle_key(key(KeyCode::Char('/')), ctx).unwrap();
+            assert!(screen.navigation_pane.is_filtering());
 
             let mut typed = String::new();
             for c in ['q', 'p', 'r', '?', '~', 'h', 'l'] {
                 typed.push(c);
                 match screen.handle_key(key(KeyCode::Char(c)), ctx).unwrap() {
-                    Some(Action::UpdateFilter { text }) => assert_eq!(text, typed),
+                    None | Some(Action::SelectionChanged { .. }) => {}
                     other => panic!("'{c}' escaped the filter as {other:?}"),
                 }
+                assert_eq!(screen.navigation_pane.filter_text(), typed);
             }
 
             assert!(screen.handle_key(key(KeyCode::Tab), ctx).unwrap().is_none());
             assert_eq!(screen.focused_pane, FocusedPane::Navigation);
 
             // Leaving the filter gives the shortcuts back
-            let action = screen.handle_key(key(KeyCode::Esc), ctx).unwrap();
-            assert!(matches!(action, Some(Action::CancelFilter)));
-            screen.update(Action::CancelFilter, ctx).unwrap();
+            screen.handle_key(key(KeyCode::Esc), ctx).unwrap();
+            assert!(!screen.navigation_pane.is_filtering());
+            assert_eq!(screen.navigation_pane.filter_text(), "");
             let action = screen.handle_key(key(KeyCode::Char('q')), ctx).unwrap();
             assert!(matches!(action, Some(Action::Quit)));
         });
@@ -1084,6 +1149,28 @@ mod tests {
     }
 
     #[test]
+    fn an_error_during_an_edit_is_shown_inside_the_editor() {
+        // Regression: any error replaced the whole content pane, hiding the
+        // fields being edited until it was dismissed.
+        with_screen(|screen, ctx| {
+            screen
+                .update(loaded("/a", json!({"api_key": "v"})), ctx)
+                .unwrap();
+            screen.update(Action::EditSecret, ctx).unwrap();
+
+            let failed = Action::SetError {
+                message: "Failed to save secret: Access denied".to_string(),
+            };
+            screen.update(failed, ctx).unwrap();
+
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(screen_text.contains("Access denied"), "{screen_text}");
+            assert!(screen_text.contains("api_key"), "{screen_text}");
+            assert!(screen.error_message.is_none());
+        });
+    }
+
+    #[test]
     fn version_result_for_another_secret_is_ignored() {
         // Regression: SecretVersionLoaded carried no path, so an old version
         // of A could be loaded into B's view and then saved over B.
@@ -1121,6 +1208,7 @@ mod tests {
 
             let stale = Action::VersionLoadedForEdit {
                 path: "/a".to_string(),
+                version: 1,
                 data: secret(json!({"a": "old"})),
             };
             screen.update(stale, ctx).unwrap();
@@ -1128,10 +1216,416 @@ mod tests {
 
             let matching = Action::VersionLoadedForEdit {
                 path: "/b".to_string(),
+                version: 1,
                 data: secret(json!({"b": "old"})),
             };
             screen.update(matching, ctx).unwrap();
             assert_eq!(screen.edit_view.as_ref().unwrap().path(), "/b");
+        });
+    }
+
+    #[test]
+    fn editing_an_old_version_says_that_saving_restores_it() {
+        // Regression: the only sign of an old version was a missing
+        // "(current)" label, and saving the edit silently rolled back.
+        with_screen(|screen, ctx| {
+            screen.update(loaded_with_versions("/b", 7), ctx).unwrap();
+
+            // Old version on screen, then `e`
+            let old = Action::SecretVersionLoaded {
+                path: "/b".to_string(),
+                version: 3,
+                data: secret(json!({"k": "old"})),
+            };
+            screen.update(old, ctx).unwrap();
+            let screen_text = text(screen, ctx, 100, 24);
+            assert!(
+                screen_text.contains("Viewing v3, not the current version (v7)"),
+                "{screen_text}"
+            );
+
+            screen.update(Action::EditSecret, ctx).unwrap();
+            let screen_text = text(screen, ctx, 100, 24);
+            assert!(screen_text.contains("Copy of v3"), "{screen_text}");
+            assert!(
+                screen_text.contains("replaces the current v7"),
+                "{screen_text}"
+            );
+            assert!(screen_text.contains("unsaved"), "{screen_text}");
+        });
+
+        with_screen(|screen, ctx| {
+            screen.update(loaded_with_versions("/b", 7), ctx).unwrap();
+
+            // "Restore as new" from the version list
+            let for_edit = Action::VersionLoadedForEdit {
+                path: "/b".to_string(),
+                version: 2,
+                data: secret(json!({"k": "older"})),
+            };
+            screen.update(for_edit, ctx).unwrap();
+            let screen_text = text(screen, ctx, 100, 24);
+            assert!(screen_text.contains("Copy of v2"), "{screen_text}");
+        });
+    }
+
+    #[test]
+    fn selecting_another_secret_never_leaves_the_old_one_on_screen() {
+        // Regression: the previous secret stayed in the pane until the next
+        // one arrived, with nothing to say that it was loading.
+        with_screen(|screen, ctx| {
+            screen
+                .update(loaded("/a", json!({"field_a": "v"})), ctx)
+                .unwrap();
+            screen.update(selected(Some("/b")), ctx).unwrap();
+
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(!screen_text.contains("field_a"), "{screen_text}");
+            assert!(screen_text.contains("Loading"), "{screen_text}");
+            assert!(screen_text.contains(" /b "), "{screen_text}");
+
+            screen
+                .update(loaded("/b", json!({"field_b": "v"})), ctx)
+                .unwrap();
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(screen_text.contains("field_b"), "{screen_text}");
+            assert!(!screen_text.contains("Loading"), "{screen_text}");
+        });
+    }
+
+    #[test]
+    fn selecting_a_folder_clears_the_pane() {
+        with_screen(|screen, ctx| {
+            screen
+                .update(loaded("/a", json!({"field_a": "v"})), ctx)
+                .unwrap();
+            screen.focused_pane = FocusedPane::Content;
+
+            screen.update(selected(None), ctx).unwrap();
+
+            assert!(screen.detail_view.is_none());
+            assert_eq!(screen.focused_pane, FocusedPane::Navigation);
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(!screen_text.contains("field_a"), "{screen_text}");
+            assert!(!screen_text.contains("Loading"), "{screen_text}");
+        });
+    }
+
+    #[test]
+    fn reselecting_the_secret_on_screen_keeps_it() {
+        with_screen(|screen, ctx| {
+            screen
+                .update(loaded("/a", json!({"field_a": "v"})), ctx)
+                .unwrap();
+            screen.update(selected(Some("/a")), ctx).unwrap();
+            assert!(screen.detail_view.is_some());
+            assert!(screen.loading_secret.is_none());
+        });
+    }
+
+    #[test]
+    fn enter_on_a_secret_focuses_it_once_it_is_there() {
+        with_screen(|screen, ctx| {
+            // Not loaded yet: focus waits for it
+            let open = Action::OpenSecret {
+                path: "/a".to_string(),
+            };
+            screen.update(open.clone(), ctx).unwrap();
+            assert_eq!(screen.focused_pane, FocusedPane::Navigation);
+            assert!(text(screen, ctx, 80, 24).contains("Loading"));
+
+            screen.update(loaded("/a", json!({"k": "v"})), ctx).unwrap();
+            assert_eq!(screen.focused_pane, FocusedPane::Content);
+
+            // Already on screen: focus moves at once
+            screen.focused_pane = FocusedPane::Navigation;
+            screen.update(open, ctx).unwrap();
+            assert_eq!(screen.focused_pane, FocusedPane::Content);
+        });
+    }
+
+    #[test]
+    fn a_new_secret_is_focused_once_it_has_been_saved_and_read_back() {
+        with_screen(|screen, ctx| {
+            screen
+                .update(
+                    Action::CreateSecret {
+                        name: "/new".to_string(),
+                    },
+                    ctx,
+                )
+                .unwrap();
+            assert_eq!(screen.focused_pane, FocusedPane::Content);
+
+            // The order the save produces: saved, the list reloads and puts
+            // its cursor on the new secret, then the secret arrives
+            let saved = Action::SecretSaved {
+                path: "/new".to_string(),
+            };
+            screen.update(saved, ctx).unwrap();
+            assert!(screen.edit_view.is_none());
+            screen.update(selected(Some("/new")), ctx).unwrap();
+            screen
+                .update(loaded("/new", json!({"k": "v"})), ctx)
+                .unwrap();
+
+            assert_eq!(screen.focused_pane, FocusedPane::Content);
+            assert_eq!(screen.detail_view.as_ref().unwrap().path(), "/new");
+        });
+    }
+
+    #[test]
+    fn moving_on_cancels_a_pending_enter() {
+        with_screen(|screen, ctx| {
+            let open = Action::OpenSecret {
+                path: "/a".to_string(),
+            };
+            screen.update(open, ctx).unwrap();
+            screen.update(selected(Some("/b")), ctx).unwrap();
+            screen.update(loaded("/b", json!({"k": "v"})), ctx).unwrap();
+            assert_eq!(screen.focused_pane, FocusedPane::Navigation);
+        });
+    }
+
+    #[test]
+    fn a_deleted_secret_leaves_the_screen() {
+        // Regression: the pane kept showing the deleted secret, which could
+        // then be edited and saved back.
+        with_screen(|screen, ctx| {
+            screen.update(loaded("/a", json!({"k": "v"})), ctx).unwrap();
+            screen.focused_pane = FocusedPane::Content;
+
+            let deleted = Action::SecretDeleted {
+                path: "/a".to_string(),
+            };
+            screen.update(deleted, ctx).unwrap();
+
+            assert!(screen.detail_view.is_none());
+            assert_eq!(screen.focused_pane, FocusedPane::Navigation);
+        });
+    }
+
+    #[test]
+    fn delete_dialog_shows_everything_at_80x24_and_needs_y() {
+        // Regression: the dialog was 30% of the screen height, so at 80x24
+        // neither the path nor the warning fitted, and Enter confirmed.
+        with_screen(|screen, ctx| {
+            screen
+                .update(loaded_with_versions("/app/db", 3), ctx)
+                .unwrap();
+            let ask = Action::ShowDeleteConfirmation {
+                item_name: "/app/db".to_string(),
+            };
+            screen.update(ask, ctx).unwrap();
+
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(screen_text.contains("Delete secret"), "{screen_text}");
+            assert!(screen_text.contains("/app/db"), "{screen_text}");
+            assert!(
+                screen_text.contains("All 3 versions and the metadata are destroyed."),
+                "{screen_text}"
+            );
+            assert!(
+                screen_text.contains("This cannot be undone."),
+                "{screen_text}"
+            );
+            assert!(screen_text.contains("y delete"), "{screen_text}");
+
+            // Enter is not a confirmation
+            let action = screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            assert!(action.is_none(), "{action:?}");
+            assert!(screen.delete_confirmation.is_some());
+
+            let action = screen.handle_key(key(KeyCode::Char('y')), ctx).unwrap();
+            assert!(
+                matches!(&action, Some(Action::DeleteSecret { path }) if path == "/app/db"),
+                "{action:?}"
+            );
+            assert!(screen.delete_confirmation.is_none());
+        });
+    }
+
+    #[test]
+    fn delete_dialog_without_history_does_not_guess_a_count() {
+        with_screen(|screen, ctx| {
+            let ask = Action::ShowDeleteConfirmation {
+                item_name: "/app/other".to_string(),
+            };
+            screen.update(ask, ctx).unwrap();
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(
+                screen_text.contains("Every version and the metadata are destroyed."),
+                "{screen_text}"
+            );
+
+            let action = screen.handle_key(key(KeyCode::Esc), ctx).unwrap();
+            assert!(action.is_none());
+            assert!(screen.delete_confirmation.is_none());
+        });
+    }
+
+    #[test]
+    fn global_shortcuts_are_off_while_the_editor_has_focus() {
+        // Regression: `q` in the edit view quit the app with the edit open.
+        with_screen(|screen, ctx| {
+            screen.update(loaded("/a", json!({"k": "v"})), ctx).unwrap();
+            screen.update(Action::EditSecret, ctx).unwrap();
+            assert_eq!(screen.focused_pane, FocusedPane::Content);
+
+            for c in ['q', 'p', '~'] {
+                let action = screen.handle_key(key(KeyCode::Char(c)), ctx).unwrap();
+                assert!(action.is_none(), "'{c}' gave {action:?}");
+            }
+            assert!(screen.edit_view.is_some());
+
+            // Help and leaving the pane still work
+            let action = screen.handle_key(key(KeyCode::Char('?')), ctx).unwrap();
+            assert!(matches!(action, Some(Action::ShowHelp)));
+            screen.handle_key(key(KeyCode::Tab), ctx).unwrap();
+            assert_eq!(screen.focused_pane, FocusedPane::Navigation);
+            assert!(screen.edit_view.is_some());
+        });
+    }
+
+    #[test]
+    fn creating_over_an_existing_name_is_refused() {
+        // Regression: the name was not checked, and saving the empty editor
+        // wrote a new version over the existing secret.
+        with_screen(|screen, ctx| {
+            ctx.app
+                .state()
+                .set_list_items(vec!["db".to_string(), "dir/".to_string()]);
+            screen.update(Action::ShowCreateSecretInput, ctx).unwrap();
+
+            for c in "db".chars() {
+                screen.handle_key(key(KeyCode::Char(c)), ctx).unwrap();
+            }
+            let action = screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            assert!(action.is_none(), "{action:?}");
+            assert!(screen.create_input.is_some());
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(screen_text.contains("'db' already exists"), "{screen_text}");
+
+            // The prompt is a real text input: fix the name in place
+            screen.handle_key(key(KeyCode::Home), ctx).unwrap();
+            for c in "new-".chars() {
+                screen.handle_key(key(KeyCode::Char(c)), ctx).unwrap();
+            }
+            let action = screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            assert!(
+                matches!(&action, Some(Action::CreateSecret { name }) if name == "/new-db"),
+                "{action:?}"
+            );
+            assert!(screen.create_input.is_none());
+        });
+    }
+
+    #[test]
+    fn pasted_text_is_never_run_as_commands() {
+        // Regression: without bracketed paste a pasted "dy" deleted the
+        // selected secret.
+        with_screen(|screen, ctx| {
+            ctx.app.state().set_list_items(vec!["db".to_string()]);
+            screen.init(ctx).unwrap();
+            screen
+                .update(loaded("/db", json!({"k": "v"})), ctx)
+                .unwrap();
+
+            let action = screen.handle_paste("dy\nq", ctx).unwrap();
+            assert!(action.is_none(), "{action:?}");
+            assert!(screen.delete_confirmation.is_none());
+
+            // In the name prompt it is text, first line only
+            screen.update(Action::ShowCreateSecretInput, ctx).unwrap();
+            screen.handle_paste("pasted-name\nq", ctx).unwrap();
+            let action = screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            assert!(
+                matches!(&action, Some(Action::CreateSecret { name }) if name == "/pasted-name"),
+                "{action:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_standard_terminal_shows_more_than_a_dozen_fields() {
+        // Regression: at 80x24, 15 rows were headers, footers and borders,
+        // leaving 7 rows for fields.
+        with_screen(|screen, ctx| {
+            let fields: serde_json::Map<String, serde_json::Value> = (0..16)
+                .map(|i| (format!("field_{i:02}"), json!("v")))
+                .collect();
+            screen
+                .update(loaded("/app/db", serde_json::Value::Object(fields)), ctx)
+                .unwrap();
+
+            let screen_text = text(screen, ctx, 80, 24);
+            for i in 0..16 {
+                assert!(
+                    screen_text.contains(&format!("field_{i:02}")),
+                    "field_{i:02} is not on screen:\n{screen_text}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn header_and_footer_say_where_you_are_and_what_works() {
+        with_screen(|screen, ctx| {
+            screen.update(loaded("/a", json!({"k": "v"})), ctx).unwrap();
+            let lines = rows(screen, ctx, 80, 24);
+
+            // Which Vault this is
+            assert!(lines[0].contains("VltView"), "{}", lines[0]);
+            assert!(lines[0].contains("http://127.0.0.1:1"), "{}", lines[0]);
+
+            // Navigation has focus: its keys, none of the secret's
+            let footer = &lines[23];
+            assert!(footer.contains("Enter open"), "{footer}");
+            assert!(footer.contains("n new"), "{footer}");
+            assert!(!footer.contains("e edit"), "{footer}");
+
+            // Regression: the footer always offered n/d, which do nothing
+            // while the content pane has focus
+            screen.handle_key(key(KeyCode::Tab), ctx).unwrap();
+            let lines = rows(screen, ctx, 80, 24);
+            let footer = &lines[23];
+            assert!(footer.contains("e edit"), "{footer}");
+            assert!(footer.contains("c copy"), "{footer}");
+            assert!(!footer.contains("n new"), "{footer}");
+            assert!(!footer.contains("d delete"), "{footer}");
+
+            // Regression: "Ctrl+s: Save secret" was cut off at 80 columns
+            screen.update(Action::EditSecret, ctx).unwrap();
+            let lines = rows(screen, ctx, 80, 24);
+            let footer = &lines[23];
+            assert!(footer.contains("Ctrl+s save"), "{footer}");
+            assert!(footer.contains("Esc cancel"), "{footer}");
+        });
+    }
+
+    #[test]
+    fn busy_indicator_follows_the_loading_state() {
+        with_screen(|screen, ctx| {
+            let spinner = |line: &str| line.chars().any(|c| ('⠀'..='⣿').contains(&c));
+
+            let idle = rows(screen, ctx, 80, 24);
+            assert!(!spinner(&idle[0]), "{}", idle[0]);
+
+            screen
+                .update(Action::SetLoading { loading: true }, ctx)
+                .unwrap();
+            let busy = rows(screen, ctx, 80, 24);
+            assert!(spinner(&busy[0]), "{}", busy[0]);
+        });
+    }
+
+    #[test]
+    fn tab_with_nothing_to_focus_says_why() {
+        with_screen(|screen, ctx| {
+            screen.handle_key(key(KeyCode::Tab), ctx).unwrap();
+            assert_eq!(screen.focused_pane, FocusedPane::Navigation);
+            let lines = rows(screen, ctx, 80, 24);
+            assert!(lines[23].contains("Select a secret first"), "{}", lines[23]);
         });
     }
 }

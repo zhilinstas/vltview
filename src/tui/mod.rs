@@ -1,10 +1,18 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
+};
 use std::io;
 use std::time::Duration;
 
@@ -18,10 +26,14 @@ pub mod async_manager;
 pub mod component;
 pub mod components;
 pub mod context;
+pub mod keymap;
 pub mod log_buffer;
 pub mod root;
 
 use root::Root;
+
+/// How often the event loop wakes up when there is no input
+const TICK: Duration = Duration::from_millis(50);
 
 /// Main TUI application struct (new component-based architecture)
 pub struct Tui {
@@ -44,7 +56,9 @@ impl Tui {
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        // Bracketed paste: the terminal marks pasted text as such, so it
+        // arrives as one `Event::Paste` instead of as typed keys
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
@@ -71,7 +85,9 @@ impl Tui {
         tracing::info!("Starting TUI event loop (component architecture)");
 
         // Initialize app (load initial data)
-        self.app.initialize().await?;
+        if !self.connect().await? {
+            return Ok(());
+        }
 
         // Initialize root component
         self.root.init(&self.app)?;
@@ -82,10 +98,16 @@ impl Tui {
             self.render()?;
 
             // Poll for events with timeout
-            if event::poll(Duration::from_millis(100))?
-                && let Event::Key(key) = event::read()?
-            {
-                self.handle_key_event(key).await?;
+            if event::poll(TICK)? {
+                match event::read()? {
+                    Event::Key(key) => self.handle_key_event(key).await?,
+                    Event::Paste(text) => {
+                        if let Some(action) = self.root.handle_paste(&text, &self.app)? {
+                            self.process_action(action).await?;
+                        }
+                    }
+                    _ => {}
+                }
             }
 
             // Poll for async operation completions
@@ -93,6 +115,9 @@ impl Tui {
             for action in completed_actions {
                 self.root.process_action(action, &mut self.app)?;
             }
+
+            // Time-based work: the debounced preview, the busy indicator
+            self.root.tick(&mut self.app)?;
 
             // Handle pending clipboard operations
             if let Some(text) = self.root.take_pending_clipboard() {
@@ -130,6 +155,63 @@ impl Tui {
         self.app.shutdown().await?;
 
         Ok(())
+    }
+
+    /// Load the initial folder, showing what is being waited for.
+    ///
+    /// The first request can take as long as the request timeout. The screen
+    /// says where it is connecting to meanwhile, and `q` or Ctrl+C gives up.
+    /// Returns false if the user quit.
+    async fn connect(&mut self) -> Result<bool> {
+        let address = self.app.vault_client().base_url().to_string();
+        let started = std::time::Instant::now();
+
+        let Self { terminal, app, .. } = self;
+        let initialize = app.initialize();
+        tokio::pin!(initialize);
+
+        loop {
+            terminal
+                .draw(|frame| {
+                    let line = Line::from(vec![
+                        Span::styled(
+                            format!(" {} ", components::popup::spinner_frame()),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::raw("Connecting to "),
+                        Span::styled(
+                            address.as_str(),
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  {}s  (q to quit)", started.elapsed().as_secs()),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]);
+                    frame.render_widget(Paragraph::new(vec![Line::from(""), line]), frame.area());
+                })
+                .map_err(|e| anyhow::anyhow!("Render error: {}", e))?;
+
+            tokio::select! {
+                result = &mut initialize => {
+                    result?;
+                    return Ok(true);
+                }
+                _ = tokio::time::sleep(TICK) => {
+                    while event::poll(Duration::ZERO)? {
+                        if let Event::Key(key) = event::read()? {
+                            let ctrl_c = key.code == KeyCode::Char('c')
+                                && key.modifiers == KeyModifiers::CONTROL;
+                            if ctrl_c || key.code == KeyCode::Char('q') {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Handle keyboard events
@@ -184,7 +266,11 @@ impl Drop for Tui {
     fn drop(&mut self) {
         // Restore terminal on exit
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let _ = self.terminal.show_cursor();
 
         tracing::debug!("Terminal restored");

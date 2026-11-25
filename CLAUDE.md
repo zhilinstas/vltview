@@ -134,7 +134,7 @@ HTTP client for Vault API using reqwest + Tokio.
 // Component emits action in handle_key()
 fn handle_key(&mut self, key: KeyEvent, ctx: &ComponentContext) -> Result<Option<Action>> {
     match key.code {
-        KeyCode::Enter => Ok(Some(Action::ViewSecret { path: "...".into(), should_focus: true })),
+        KeyCode::Enter => Ok(Some(Action::OpenSecret { path: "...".into() })),
         _ => Ok(None)
     }
 }
@@ -152,6 +152,15 @@ fn update(&mut self, action: Action, ctx: &mut ComponentContext) -> Result<Optio
     }
 }
 ```
+
+### Selection and Preview
+
+The navigation cursor is the selection, and the content pane shows it.
+
+- `NavigationPane` emits `Action::SelectionChanged` whenever the cursor rests on a different item, whatever moved it (cursor keys, reload, filter, changing folder). Do not load a secret from a key handler; change the selection and let this action do it.
+- `Root::selection_changed` loads the secret. The first cursor step after a pause loads at once; while the cursor keeps moving, only the secret it stops on is loaded (`PREVIEW_DEBOUNCE`). Every load is a read in Vault's audit log, so scrolling must not read what it passes.
+- `MainScreen` never leaves the previous secret on screen: a selected secret that has not arrived is a "Loading" placeholder.
+- A reload keeps the cursor on the same name (`NavigationPane::reload`).
 
 ### Component Communication
 - Components emit actions (return `Some(Action)` from `handle_key()` or `update()`)
@@ -183,6 +192,7 @@ src/
 │   ├── component.rs        # Component trait
 │   ├── async_manager.rs    # Async operation spawner
 │   ├── context.rs          # ComponentContext, RenderContext
+│   ├── keymap.rs           # Key hints per context (footers and help)
 │   ├── log_buffer.rs       # Global log storage for UI
 │   └── components/         # UI components
 │       ├── main_screen.rs  # Main split-view screen
@@ -191,7 +201,8 @@ src/
 │       ├── edit_view.rs    # Right: edit secret
 │       ├── policy_screen.rs # Policy viewer
 │       ├── log_screen.rs   # Log viewer
-│       └── help_overlay.rs # Help modal
+│       ├── help_overlay.rs # Help modal
+│       └── popup.rs        # Shared helpers: centered popups, truncate, wrap
 ├── vault/                  # Vault API client
 │   ├── mod.rs              # VaultClient
 │   ├── kv.rs               # KV engine API
@@ -215,6 +226,12 @@ src/
 2. Handle action in relevant component's `update()` method
 3. If async operation needed, spawn in `Root::process_action()` via AsyncManager
 4. Return completion action from async task
+
+### Adding or Changing a Key Binding
+
+1. Handle the key in the component's `handle_key()`
+2. Add or change the entry in `src/tui/keymap.rs` for that context. Footers and the help overlay are generated from it, so a key that is not there is not shown anywhere
+3. Footer labels are short; hints that do not fit the terminal width are dropped by priority, never cut
 
 ### Adding a New Component
 
@@ -273,6 +290,12 @@ Environment variables:
 - Components manage their own scroll state
 - Adjust scroll in `draw()` before rendering to keep selection visible
 - Use `Block::borders()` height to calculate viewport size
+- Lists that can outgrow the pane are rendered with a `ListState` kept in the component
+
+### Layout
+- The main screen has one header line and one footer line; each pane is a single bordered block with its state on the border. Do not add nested boxes: at 80x24 every row counts
+- Popups have a fixed size (`popup::centered`), not a percentage of the screen, so their text is all on screen on a small terminal
+- Text that carries a warning or instructions is wrapped or dropped whole, never cut off mid-sentence. Check new UI at 80x24 (the render tests draw into a `TestBackend` of that size)
 
 ### KV Version Handling
 - Supports both KV v1 (unversioned) and KV v2 (versioned)
@@ -400,4 +423,5 @@ Clipboard manager automatically clears copied secrets after 30 seconds:
 - **Check the HTTP status of every response** (`ensure_success` in `kv.rs`). A write that Vault rejects must reach the UI as an error
 - **Keep secret values as `vault::SecretData`** (`HashMap<String, serde_json::Value>`), not strings. Converting to `String` anywhere on the load path deletes non-string fields on the next save. Use `app::secret::display_value()` to show a value and `edited_value()` to turn edited text back into a value
 - **Async completions must say what they are for** (path, version) and be ignored when the user has moved on; see the `SecretLoaded` guard in `Root::process_action`
+- **Pasted text is data**: it arrives as `Event::Paste` and goes through `Component::handle_paste`, which only text inputs act on. Never feed it to `handle_key`
 - Use TLS verification by default (`--insecure` flag for dev only, warns user)

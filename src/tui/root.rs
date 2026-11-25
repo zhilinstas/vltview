@@ -1,13 +1,23 @@
 use anyhow::Result;
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
+use std::time::{Duration, Instant};
 
 use crate::app::App;
-use crate::tui::action::Action;
+use crate::app::navigation::parent_path;
+use crate::tui::action::{Action, SelectionSource};
 use crate::tui::async_manager::AsyncManager;
 use crate::tui::component::Component;
 use crate::tui::components::{HelpOverlay, LogScreen, MainScreen, PolicyScreen};
 use crate::tui::context::{ActionSender, ComponentContext, FocusState, RenderContext};
+
+/// How long the cursor has to rest on a secret before it is loaded.
+///
+/// Every load is a read of the secret in Vault's audit log, so scrolling
+/// through a folder must not read everything on the way. The first step after
+/// a pause loads at once; while the cursor keeps moving, only the secret it
+/// stops on is loaded.
+const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// Active screen in the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +70,15 @@ pub struct Root {
 
     /// Path of the most recently requested secret. Loads are not cancelled,
     /// so results can arrive out of order; only the latest request is shown.
+    /// `None` when no secret is selected.
     latest_secret_request: Option<String>,
+
+    /// Selected secret whose load is waiting for the cursor to rest, and
+    /// when it is due
+    pending_preview: Option<(String, Instant)>,
+
+    /// When the selection last changed
+    last_selection_change: Option<Instant>,
 }
 
 impl Root {
@@ -77,6 +95,8 @@ impl Root {
             should_quit: false,
             pending_clipboard: None,
             latest_secret_request: None,
+            pending_preview: None,
+            last_selection_change: None,
         }
     }
 
@@ -130,6 +150,75 @@ impl Root {
         }
     }
 
+    /// Route pasted text to whatever text input has focus
+    pub fn handle_paste(&mut self, text: &str, app: &App) -> Result<Option<Action>> {
+        let action_tx = self.action_sender();
+        let ctx = ComponentContext::new(app, &self.focus, &action_tx);
+
+        // A paste is never a command: only the main screen has text inputs
+        if self.help_overlay.captures_input() || self.active_screen != ActiveScreen::Main {
+            return Ok(None);
+        }
+        self.main_screen.handle_paste(text, &ctx)
+    }
+
+    /// Periodic work, called once per event-loop iteration
+    pub fn tick(&mut self, app: &mut App) -> Result<()> {
+        self.tick_at(app, Instant::now())
+    }
+
+    fn tick_at(&mut self, app: &mut App, now: Instant) -> Result<()> {
+        // The cursor has rested long enough: load the secret under it
+        if self
+            .pending_preview
+            .as_ref()
+            .is_some_and(|(_, due)| now >= *due)
+            && let Some((path, _)) = self.pending_preview.take()
+        {
+            self.spawn_load_secret(app, path);
+        }
+
+        // Busy means a request is in flight, whichever one it is
+        let busy = self.async_manager.has_pending();
+        let action_tx = self.action_sender();
+        let mut ctx = ComponentContext::new(app, &self.focus, &action_tx);
+        self.main_screen
+            .update(Action::SetLoading { loading: busy }, &mut ctx)?;
+
+        Ok(())
+    }
+
+    /// The navigation cursor rests on a different item
+    fn selection_changed(
+        &mut self,
+        app: &App,
+        secret: Option<String>,
+        source: SelectionSource,
+        now: Instant,
+    ) {
+        let was_resting = self
+            .last_selection_change
+            .is_none_or(|last| now.duration_since(last) >= PREVIEW_DEBOUNCE);
+        self.last_selection_change = Some(now);
+        self.pending_preview = None;
+
+        match secret {
+            // A folder or `..`: nothing to load, and anything still in
+            // flight is no longer wanted
+            None => self.latest_secret_request = None,
+            // Already requested (for example, just saved and reloaded)
+            Some(path) if self.latest_secret_request.as_deref() == Some(path.as_str()) => {}
+            Some(path) => {
+                self.latest_secret_request = Some(path.clone());
+                if source == SelectionSource::Cursor && was_resting {
+                    self.spawn_load_secret(app, path);
+                } else {
+                    self.pending_preview = Some((path, now + PREVIEW_DEBOUNCE));
+                }
+            }
+        }
+    }
+
     /// Process an action
     ///
     /// This updates component state based on actions. Some actions trigger
@@ -139,22 +228,43 @@ impl Root {
         let mut ctx = ComponentContext::new(app, &self.focus, &action_tx);
 
         match &action {
-            // Async operations - spawn and return
-            Action::ViewSecret { path, should_focus } => {
+            // The cursor moved to another item: the content pane follows,
+            // and the secret is loaded once the cursor rests
+            Action::SelectionChanged { secret, source } => {
+                let (secret, source) = (secret.clone(), *source);
+                self.main_screen.update(action, &mut ctx)?;
+                self.selection_changed(app, secret, source, Instant::now());
+                return Ok(());
+            }
+
+            // Enter on a secret: focus it, loading it now if needed
+            Action::OpenSecret { path } => {
                 let path = path.clone();
-                let should_focus = *should_focus;
+                self.main_screen.update(action, &mut ctx)?;
+
+                let waiting = self
+                    .pending_preview
+                    .as_ref()
+                    .is_some_and(|(pending, _)| *pending == path);
+                if waiting || self.latest_secret_request.as_deref() != Some(path.as_str()) {
+                    self.pending_preview = None;
+                    self.latest_secret_request = Some(path.clone());
+                    self.spawn_load_secret(app, path);
+                }
+                return Ok(());
+            }
+
+            // Load a secret now, whatever the cursor is doing
+            Action::ViewSecret { path } => {
+                self.pending_preview = None;
                 self.latest_secret_request = Some(path.clone());
-                self.spawn_load_secret(app, path, should_focus);
-                // Set loading state
-                let action_tx = self.action_sender();
-                let mut ctx = ComponentContext::new(app, &self.focus, &action_tx);
-                let _ = self
-                    .main_screen
-                    .update(Action::SetLoading { loading: true }, &mut ctx);
+                self.spawn_load_secret(app, path.clone());
                 return Ok(());
             }
 
             Action::LoadPolicies => {
+                self.policy_screen
+                    .update(Action::SetLoading { loading: true }, &mut ctx)?;
                 self.spawn_load_policies(app);
                 return Ok(());
             }
@@ -165,26 +275,16 @@ impl Root {
             }
 
             Action::SaveSecret { path, data } => {
-                // Spawn async save operation
-                let _ = self
-                    .main_screen
-                    .update(Action::SetLoading { loading: true }, &mut ctx);
                 self.spawn_save_secret(app, path.clone(), data.clone());
                 return Ok(());
             }
 
             Action::ViewSecretVersion { path, version } => {
-                let _ = self
-                    .main_screen
-                    .update(Action::SetLoading { loading: true }, &mut ctx);
                 self.spawn_load_secret_version(app, path.clone(), *version);
                 return Ok(());
             }
 
             Action::CreateFromVersion { path, version } => {
-                let _ = self
-                    .main_screen
-                    .update(Action::SetLoading { loading: true }, &mut ctx);
                 self.spawn_load_version_for_edit(app, path.clone(), *version);
                 return Ok(());
             }
@@ -195,10 +295,6 @@ impl Root {
             }
 
             Action::NavigateTo { path } => {
-                // Set loading state and spawn async navigation
-                let _ = self
-                    .main_screen
-                    .update(Action::SetLoading { loading: true }, &mut ctx);
                 self.spawn_navigate_to(app, path.clone());
                 return Ok(());
             }
@@ -206,37 +302,18 @@ impl Root {
             Action::NavigateUp => {
                 let current = app.state().current_path();
                 if current != "/" {
-                    let parent = if let Some(pos) = current.rfind('/') {
-                        if pos == 0 {
-                            "/".to_string()
-                        } else {
-                            current[..pos].to_string()
-                        }
-                    } else {
-                        "/".to_string()
-                    };
-                    let _ = self
-                        .main_screen
-                        .update(Action::SetLoading { loading: true }, &mut ctx);
-                    self.spawn_navigate_to(app, parent);
+                    self.spawn_navigate_to(app, parent_path(&current));
                 }
                 return Ok(());
             }
 
             Action::Refresh => {
-                // Spawn async operation to reload current directory from Vault
-                let _ = self
-                    .main_screen
-                    .update(Action::SetLoading { loading: true }, &mut ctx);
                 self.spawn_refresh(app);
                 return Ok(());
             }
 
             Action::HistoryBack => {
                 if let Some(path) = app.state().go_back() {
-                    let _ = self
-                        .main_screen
-                        .update(Action::SetLoading { loading: true }, &mut ctx);
                     self.spawn_navigate_to(app, path);
                 }
                 return Ok(());
@@ -244,9 +321,6 @@ impl Root {
 
             Action::HistoryForward => {
                 if let Some(path) = app.state().go_forward() {
-                    let _ = self
-                        .main_screen
-                        .update(Action::SetLoading { loading: true }, &mut ctx);
                     self.spawn_navigate_to(app, path);
                 }
                 return Ok(());
@@ -265,6 +339,7 @@ impl Root {
                 }
                 return Ok(());
             }
+
             // Screen transitions
             Action::ShowLogScreen => {
                 self.active_screen = ActiveScreen::Logs;
@@ -286,6 +361,15 @@ impl Root {
                 self.help_overlay.update(action.clone(), &mut ctx)?;
             }
 
+            // A deleted secret is no longer requested or shown
+            Action::SecretDeleted { path }
+                if self.latest_secret_request.as_deref() == Some(path.as_str()) =>
+            {
+                self.latest_secret_request = None;
+                self.pending_preview = None;
+                self.main_screen.update(action, &mut ctx)?;
+            }
+
             // A load that was overtaken by a newer request: drop it, so the
             // content pane never shows a secret other than the last one asked for
             Action::SecretLoaded { path, .. }
@@ -294,9 +378,29 @@ impl Root {
                 tracing::debug!("Ignoring stale secret load");
             }
 
+            // A failed load that was overtaken is of no interest either
+            Action::SecretLoadFailed { path, .. }
+                if self.latest_secret_request.as_deref() != Some(path.as_str()) =>
+            {
+                tracing::debug!("Ignoring stale secret load failure");
+            }
+
+            // The secret on screen could not be loaded. Forget the request,
+            // so that Enter on it tries again.
+            Action::SecretLoadFailed { .. } => {
+                self.latest_secret_request = None;
+                self.main_screen.update(action, &mut ctx)?;
+            }
+
+            // Errors belong to the screen the user is looking at
+            Action::SetError { .. } if self.active_screen == ActiveScreen::Policy => {
+                self.policy_screen.update(action, &mut ctx)?;
+            }
+
             // Main screen actions
             Action::SecretLoaded { .. }
             | Action::SecretSaved { .. }
+            | Action::SecretDeleted { .. }
             | Action::EditSecret
             | Action::CreateSecret { .. }
             | Action::ShowCreateSecretInput
@@ -309,23 +413,10 @@ impl Root {
             | Action::ClearError
             | Action::SetLoading { .. }
             | Action::StateUpdated
-            | Action::StartFilter
-            | Action::UpdateFilter { .. }
-            | Action::ConfirmFilter
-            | Action::CancelFilter
             | Action::FocusPane { .. }
-            | Action::ToggleValueVisibility
-            | Action::ToggleDetailMode
-            | Action::CopySelectedValue
             | Action::SecretVersionLoaded { .. }
             | Action::VersionLoadedForEdit { .. }
-            | Action::StartEditValue
-            | Action::StartEditKey
-            | Action::ConfirmEdit
-            | Action::CancelEdit
-            | Action::ToggleEditTarget
-            | Action::AddField
-            | Action::DeleteField => {
+            | Action::CancelEdit => {
                 // Process in MainScreen and handle any returned actions
                 if let Some(returned_action) = self.main_screen.update(action, &mut ctx)? {
                     // Recursively process returned actions (like CopyToClipboard)
@@ -345,15 +436,8 @@ impl Root {
                 self.policy_screen.update(action, &mut ctx)?;
             }
 
-            Action::ScrollPolicy { .. } => {
-                if self.active_screen == ActiveScreen::Policy {
-                    self.policy_screen.update(action, &mut ctx)?;
-                }
-            }
-
-            Action::CopyPolicy if self.active_screen == ActiveScreen::Policy => {
-                // This action is handled by the old Tui for now (clipboard integration)
-                // In future phases, this would be handled by Root with a clipboard service
+            Action::ScrollPolicy { .. } if self.active_screen == ActiveScreen::Policy => {
+                self.policy_screen.update(action, &mut ctx)?;
             }
 
             _ => {
@@ -376,8 +460,9 @@ impl Root {
     // ═══════════════════════════════════════════════════════════════
 
     /// Spawn async operation to load a secret
-    fn spawn_load_secret(&mut self, app: &App, path: String, _should_focus: bool) {
+    fn spawn_load_secret(&mut self, app: &App, path: String) {
         let vault_client = app.vault_client().clone();
+        let failed_path = path.clone();
 
         self.async_manager.spawn(
             async move {
@@ -427,7 +512,8 @@ impl Root {
                     metadata,
                 })
             },
-            move |e| Action::SetError {
+            move |e| Action::SecretLoadFailed {
+                path: failed_path.clone(),
                 message: format!("Failed to load secret: {}", e),
             },
         );
@@ -441,9 +527,7 @@ impl Root {
             async move {
                 nav.navigate_to(path.clone()).await?;
                 // Emit action to update UI after state has been updated
-                Ok(Action::Batch {
-                    actions: vec![Action::StateUpdated, Action::SetLoading { loading: false }],
-                })
+                Ok(Action::StateUpdated)
             },
             |e| Action::SetError {
                 message: format!("Navigation failed: {}", e),
@@ -459,9 +543,7 @@ impl Root {
             async move {
                 nav.refresh().await?;
                 // Emit action to update UI after state has been updated
-                Ok(Action::Batch {
-                    actions: vec![Action::StateUpdated, Action::SetLoading { loading: false }],
-                })
+                Ok(Action::StateUpdated)
             },
             |e| Action::SetError {
                 message: format!("Failed to refresh: {}", e),
@@ -543,10 +625,8 @@ impl Root {
                             message: format!("Saved: {}", path),
                         },
                         Action::Refresh, // Refresh navigation list to show new secret
-                        Action::ViewSecret {
-                            path: path.clone(),
-                            should_focus: false,
-                        }, // Reload secret to show new version in history
+                        // Reload secret to show new version in history
+                        Action::ViewSecret { path: path.clone() },
                     ],
                 })
             },
@@ -565,15 +645,10 @@ impl Root {
                 // Load the specific version
                 let data = secret_service.get_version(&path, version).await?;
 
-                Ok(Action::Batch {
-                    actions: vec![
-                        Action::SecretVersionLoaded {
-                            path: path.clone(),
-                            version,
-                            data,
-                        },
-                        Action::SetLoading { loading: false },
-                    ],
+                Ok(Action::SecretVersionLoaded {
+                    path: path.clone(),
+                    version,
+                    data,
                 })
             },
             |e| Action::SetError {
@@ -591,14 +666,10 @@ impl Root {
                 // Load the specific version
                 let data = secret_service.get_version(&path, version).await?;
 
-                Ok(Action::Batch {
-                    actions: vec![
-                        Action::VersionLoadedForEdit {
-                            path: path.clone(),
-                            data,
-                        },
-                        Action::SetLoading { loading: false },
-                    ],
+                Ok(Action::VersionLoadedForEdit {
+                    path: path.clone(),
+                    version,
+                    data,
                 })
             },
             |e| Action::SetError {
@@ -645,6 +716,12 @@ mod tests {
         App::new(config, "/".to_string()).unwrap()
     }
 
+    fn test_root(app: &App) -> Root {
+        let mut root = Root::new(tokio::runtime::Handle::current());
+        root.init(app).unwrap();
+        root
+    }
+
     fn loaded(path: &str, field: &str) -> Action {
         Action::SecretLoaded {
             path: path.to_string(),
@@ -656,8 +733,27 @@ mod tests {
     fn view(path: &str) -> Action {
         Action::ViewSecret {
             path: path.to_string(),
-            should_focus: false,
         }
+    }
+
+    fn failed(path: &str) -> Action {
+        Action::SecretLoadFailed {
+            path: path.to_string(),
+            message: format!("Failed to load secret: no access to {path}"),
+        }
+    }
+
+    fn pending(root: &Root) -> Option<&str> {
+        root.pending_preview.as_ref().map(|(path, _)| path.as_str())
+    }
+
+    /// Requests started so far
+    fn spawned(root: &Root) -> u64 {
+        root.async_manager.spawned_count()
+    }
+
+    fn cursor_on(root: &mut Root, app: &App, path: &str, at: Instant) {
+        root.selection_changed(app, Some(path.to_string()), SelectionSource::Cursor, at);
     }
 
     fn screen_text(root: &mut Root, app: &App) -> String {
@@ -677,8 +773,7 @@ mod tests {
         // Regression: loads are not cancelled, and the last one to *arrive*
         // used to win, so the pane could show A while the cursor was on B.
         let mut app = test_app();
-        let mut root = Root::new(tokio::runtime::Handle::current());
-        root.init(&app).unwrap();
+        let mut root = test_root(&app);
 
         // The user moves from A to B before A's load completes
         root.process_action(view("/app/a"), &mut app).unwrap();
@@ -691,7 +786,7 @@ mod tests {
             .unwrap();
 
         let text = screen_text(&mut root, &app);
-        assert!(text.contains("Secret Details: /app/b"), "{text}");
+        assert!(text.contains(" /app/b "), "{text}");
         assert!(text.contains("field_b"));
         assert!(!text.contains("field_a"));
     }
@@ -699,15 +794,232 @@ mod tests {
     #[tokio::test]
     async fn requested_secret_load_is_shown() {
         let mut app = test_app();
-        let mut root = Root::new(tokio::runtime::Handle::current());
-        root.init(&app).unwrap();
+        let mut root = test_root(&app);
 
         root.process_action(view("/app/a"), &mut app).unwrap();
         root.process_action(loaded("/app/a", "field_a"), &mut app)
             .unwrap();
 
         let text = screen_text(&mut root, &app);
-        assert!(text.contains("Secret Details: /app/a"), "{text}");
+        assert!(text.contains(" /app/a "), "{text}");
         assert!(text.contains("field_a"));
+    }
+
+    #[tokio::test]
+    async fn scrolling_reads_only_where_the_cursor_starts_and_stops() {
+        // Regression: every cursor step read the secret under it, so holding
+        // `j` read (and audit-logged) every secret in the folder.
+        let mut app = test_app();
+        let mut root = test_root(&app);
+        let start = Instant::now();
+        let step = Duration::from_millis(30);
+
+        // The first step after a pause loads at once
+        cursor_on(&mut root, &app, "/s00", start);
+        assert_eq!(spawned(&root), 1);
+        assert_eq!(pending(&root), None);
+
+        // Twenty more in quick succession: none of them is read
+        let mut now = start;
+        for i in 1..=20 {
+            now += step;
+            cursor_on(&mut root, &app, &format!("/s{i:02}"), now);
+            root.tick_at(&mut app, now).unwrap();
+        }
+        assert_eq!(spawned(&root), 1);
+        assert_eq!(pending(&root), Some("/s20"));
+        assert_eq!(root.latest_secret_request.as_deref(), Some("/s20"));
+
+        // Not yet: the cursor has rested for less than the debounce time
+        root.tick_at(&mut app, now + PREVIEW_DEBOUNCE / 2).unwrap();
+        assert_eq!(spawned(&root), 1);
+
+        // Now it has: the secret it stopped on is read, once
+        root.tick_at(&mut app, now + PREVIEW_DEBOUNCE).unwrap();
+        assert_eq!(spawned(&root), 2);
+        assert_eq!(pending(&root), None);
+        root.tick_at(&mut app, now + PREVIEW_DEBOUNCE * 2).unwrap();
+        assert_eq!(spawned(&root), 2);
+    }
+
+    #[tokio::test]
+    async fn selection_moved_by_a_reload_always_waits() {
+        // Typing a filter moves the cursor with every key; none of the
+        // matches on the way should be read
+        let mut app = test_app();
+        let mut root = test_root(&app);
+        let start = Instant::now();
+
+        root.selection_changed(
+            &app,
+            Some("/db".to_string()),
+            SelectionSource::ListChange,
+            start,
+        );
+        assert_eq!(spawned(&root), 0);
+        assert_eq!(pending(&root), Some("/db"));
+
+        root.tick_at(&mut app, start + PREVIEW_DEBOUNCE).unwrap();
+        assert_eq!(spawned(&root), 1);
+    }
+
+    #[tokio::test]
+    async fn moving_onto_a_folder_cancels_the_load() {
+        let mut app = test_app();
+        let mut root = test_root(&app);
+        let start = Instant::now();
+
+        cursor_on(&mut root, &app, "/a", start);
+        cursor_on(&mut root, &app, "/b", start + Duration::from_millis(20));
+        assert_eq!(pending(&root), Some("/b"));
+
+        root.selection_changed(
+            &app,
+            None,
+            SelectionSource::Cursor,
+            start + Duration::from_millis(40),
+        );
+        assert_eq!(pending(&root), None);
+        assert_eq!(root.latest_secret_request, None);
+
+        root.tick_at(&mut app, start + PREVIEW_DEBOUNCE * 3)
+            .unwrap();
+        assert_eq!(spawned(&root), 1, "only /a was ever read");
+
+        // /a's result arrives after the cursor left: it is not shown
+        root.process_action(loaded("/a", "field_a"), &mut app)
+            .unwrap();
+        assert!(!screen_text(&mut root, &app).contains("field_a"));
+    }
+
+    #[tokio::test]
+    async fn the_selected_secret_is_not_requested_twice() {
+        let mut app = test_app();
+        let mut root = test_root(&app);
+        let start = Instant::now();
+
+        // Saved and reloaded explicitly; then the list reload puts the
+        // cursor on it
+        root.process_action(view("/a"), &mut app).unwrap();
+        assert_eq!(spawned(&root), 1);
+        root.selection_changed(
+            &app,
+            Some("/a".to_string()),
+            SelectionSource::ListChange,
+            start,
+        );
+        root.tick_at(&mut app, start + PREVIEW_DEBOUNCE).unwrap();
+        assert_eq!(spawned(&root), 1);
+    }
+
+    #[tokio::test]
+    async fn enter_loads_a_waiting_secret_at_once() {
+        let mut app = test_app();
+        let mut root = test_root(&app);
+        let start = Instant::now();
+
+        cursor_on(&mut root, &app, "/a", start);
+        cursor_on(&mut root, &app, "/b", start + Duration::from_millis(20));
+        assert_eq!(spawned(&root), 1);
+        assert_eq!(pending(&root), Some("/b"));
+
+        let open = Action::OpenSecret {
+            path: "/b".to_string(),
+        };
+        root.process_action(open.clone(), &mut app).unwrap();
+        assert_eq!(spawned(&root), 2);
+        assert_eq!(pending(&root), None);
+
+        // Enter again while it is on its way: no second read
+        root.process_action(open, &mut app).unwrap();
+        assert_eq!(spawned(&root), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_load_is_shown_and_enter_retries_it() {
+        let mut app = test_app();
+        let mut root = test_root(&app);
+
+        root.process_action(view("/a"), &mut app).unwrap();
+        root.process_action(failed("/a"), &mut app).unwrap();
+
+        let text = screen_text(&mut root, &app);
+        assert!(text.contains("no access to /a"), "{text}");
+        assert_eq!(root.latest_secret_request, None);
+
+        let open = Action::OpenSecret {
+            path: "/a".to_string(),
+        };
+        root.process_action(open, &mut app).unwrap();
+        assert_eq!(spawned(&root), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failure_for_a_secret_the_user_left_is_ignored() {
+        let mut app = test_app();
+        let mut root = test_root(&app);
+
+        root.process_action(view("/a"), &mut app).unwrap();
+        root.process_action(view("/b"), &mut app).unwrap();
+        root.process_action(failed("/a"), &mut app).unwrap();
+
+        let text = screen_text(&mut root, &app);
+        assert!(!text.contains("no access"), "{text}");
+        assert_eq!(root.latest_secret_request.as_deref(), Some("/b"));
+    }
+
+    #[tokio::test]
+    async fn a_deleted_secret_is_forgotten() {
+        // Regression: `SecretDeleted` was never handled, and the deleted
+        // secret stayed on screen.
+        let mut app = test_app();
+        let mut root = test_root(&app);
+
+        root.process_action(view("/a"), &mut app).unwrap();
+        root.process_action(loaded("/a", "field_a"), &mut app)
+            .unwrap();
+        assert!(screen_text(&mut root, &app).contains("field_a"));
+
+        let deleted = Action::SecretDeleted {
+            path: "/a".to_string(),
+        };
+        root.process_action(deleted, &mut app).unwrap();
+
+        assert!(!screen_text(&mut root, &app).contains("field_a"));
+        assert_eq!(root.latest_secret_request, None);
+    }
+
+    #[tokio::test]
+    async fn policy_errors_stay_on_the_policy_screen() {
+        // Regression: a failed policy load set the error on the main screen,
+        // and the policy screen said "No policies found".
+        let mut app = test_app();
+        let mut root = test_root(&app);
+
+        root.process_action(Action::ShowPolicyScreen, &mut app)
+            .unwrap();
+        root.process_action(Action::LoadPolicies, &mut app).unwrap();
+        assert!(screen_text(&mut root, &app).contains("Loading policies"));
+
+        let error = Action::SetError {
+            message: "Failed to load policies: permission denied".to_string(),
+        };
+        root.process_action(error, &mut app).unwrap();
+
+        let text = screen_text(&mut root, &app);
+        assert!(text.contains("permission denied"), "{text}");
+        assert!(!text.contains("No policies found"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn paste_outside_a_text_input_does_nothing() {
+        let mut app = test_app();
+        let mut root = test_root(&app);
+
+        // On the main screen with no input open, and behind the help overlay
+        assert!(root.handle_paste("dy", &app).unwrap().is_none());
+        root.process_action(Action::ShowHelp, &mut app).unwrap();
+        assert!(root.handle_paste("q", &app).unwrap().is_none());
+        assert!(!root.should_quit());
     }
 }

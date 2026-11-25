@@ -12,6 +12,7 @@ pub mod log_screen;
 pub mod main_screen;
 pub mod navigation_pane;
 pub mod policy_screen;
+pub mod popup;
 
 pub use detail_view::{DetailViewComponent, VersionInfo};
 pub use edit_view::EditViewComponent;

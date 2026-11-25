@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -10,196 +10,111 @@ use ratatui::{
 
 use crate::tui::action::Action;
 use crate::tui::component::Component;
+use crate::tui::components::popup::centered;
 use crate::tui::context::{ComponentContext, RenderContext};
+use crate::tui::keymap::{self, Context};
+
+/// Width of the key column
+const KEY_COLUMN: usize = 16;
 
 /// Help overlay showing keybindings
 ///
-/// This is a modal overlay that displays all available keyboard shortcuts.
-/// It captures all input and dismisses on Esc or ?.
+/// A modal overlay listing every key, by the place it works in. The text
+/// comes from the same table as the footers (`tui::keymap`). It scrolls, so
+/// all of it can be read on a small terminal.
 pub struct HelpOverlay {
     /// Whether this overlay is currently visible
     visible: bool,
+
+    /// First line shown
+    scroll: usize,
+
+    /// Lines shown the last time it was drawn, for paging
+    page: usize,
 }
 
 impl HelpOverlay {
     /// Create a new help overlay (hidden by default)
     pub fn new() -> Self {
-        Self { visible: false }
+        Self {
+            visible: false,
+            scroll: 0,
+            page: 10,
+        }
     }
 
-    /// Calculate a centered rectangle of given percentage size
-    fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-        let popup_layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage((100 - percent_y) / 2),
-                Constraint::Percentage(percent_y),
-                Constraint::Percentage((100 - percent_y) / 2),
-            ])
-            .split(area);
+    /// Every binding, one section per context
+    fn lines() -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
 
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage((100 - percent_x) / 2),
-                Constraint::Percentage(percent_x),
-                Constraint::Percentage((100 - percent_x) / 2),
-            ])
-            .split(popup_layout[1])[1]
-    }
-
-    fn render_title(&self, frame: &mut Frame, area: Rect) {
-        let title = Paragraph::new(Line::from(vec![Span::styled(
-            " VltView Help ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
-        );
-
-        frame.render_widget(title, area);
-    }
-
-    fn render_content(&self, frame: &mut Frame, area: Rect) {
-        let sections = vec![
-            (
-                "Navigation",
-                vec![
-                    ("j / Down", "Move down (auto-previews secrets)"),
-                    ("k / Up", "Move up (auto-previews secrets)"),
-                    ("h / Backspace", "Go to parent directory"),
-                    ("Enter", "Navigate into folders"),
-                ],
-            ),
-            (
-                "Actions",
-                vec![
-                    ("r", "Refresh current view"),
-                    ("c / y", "Copy selected item to clipboard"),
-                    ("e", "Edit selected secret"),
-                    ("n", "Create new secret"),
-                    ("d", "Delete selected item"),
-                    ("/", "Filter items (fuzzy search)"),
-                ],
-            ),
-            (
-                "Views",
-                vec![
-                    ("v", "Toggle secret value visibility"),
-                    ("l", "View version history (in secret details)"),
-                    ("p", "View policies"),
-                    ("~", "View application logs"),
-                    ("?", "Show this help"),
-                ],
-            ),
-            (
-                "General",
-                vec![
-                    ("q", "Quit application"),
-                    ("Ctrl+c", "Force quit (works anywhere)"),
-                    ("Esc", "Clear filter / Close overlay / Cancel"),
-                ],
-            ),
-        ];
-
-        let mut lines: Vec<Line> = Vec::new();
-
-        for (section_name, bindings) in sections {
-            // Section header
-            lines.push(Line::from(vec![Span::styled(
-                format!(" {} ", section_name),
+        for context in Context::ALL {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                format!(" {}", context.title()),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
-            )]));
-            lines.push(Line::from(""));
+            )));
 
-            // Key bindings
-            for (key, description) in bindings {
+            for binding in keymap::bindings(context) {
                 lines.push(Line::from(vec![
-                    Span::raw("  "),
                     Span::styled(
-                        format!("{:<14}", key),
+                        format!("   {:<KEY_COLUMN$}", binding.keys),
                         Style::default()
                             .fg(Color::Green)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(description, Style::default().fg(Color::White)),
+                    Span::styled(binding.help, Style::default().fg(Color::White)),
                 ]));
             }
-
-            lines.push(Line::from(""));
         }
 
-        let help_text = Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(Color::Cyan)),
-        );
-
-        frame.render_widget(help_text, area);
-    }
-
-    fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "Esc",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" or "),
-            Span::styled(
-                "?",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" to close"),
-        ]))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
-        );
-
-        frame.render_widget(footer, area);
+        lines
     }
 }
 
 impl Component for HelpOverlay {
     fn handle_key(&mut self, key: KeyEvent, _ctx: &ComponentContext) -> Result<Option<Action>> {
-        // Help overlay dismisses on Esc or ?
+        let page = self.page.max(1);
+
         match (key.code, key.modifiers) {
-            (KeyCode::Esc, KeyModifiers::NONE) | (KeyCode::Char('?'), KeyModifiers::NONE) => {
-                Ok(Some(Action::HideHelp))
+            (KeyCode::Esc, _)
+            | (KeyCode::Char('?'), KeyModifiers::NONE)
+            | (KeyCode::Char('q'), KeyModifiers::NONE) => return Ok(Some(Action::HideHelp)),
+
+            (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, _) => self.scroll += 1,
+            (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+                self.scroll = self.scroll.saturating_sub(1)
             }
-            _ => Ok(None), // Ignore all other keys (modal behavior)
+            (KeyCode::PageDown, _) | (KeyCode::Char(' '), _) => self.scroll += page,
+            (KeyCode::PageUp, _) => self.scroll = self.scroll.saturating_sub(page),
+            (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => self.scroll = 0,
+            // Drawing clamps the offset to the last page
+            (KeyCode::End, _) | (KeyCode::Char('G'), _) => self.scroll = usize::MAX / 2,
+
+            // Ignore all other keys (modal behavior)
+            _ => {}
         }
+
+        Ok(None)
     }
 
     fn update(&mut self, action: Action, _ctx: &mut ComponentContext) -> Result<Option<Action>> {
         match action {
             Action::ShowHelp => {
                 self.visible = true;
-                Ok(None)
+                self.scroll = 0;
             }
-            Action::HideHelp => {
-                self.visible = false;
-                Ok(None)
-            }
+            Action::HideHelp => self.visible = false,
             Action::ToggleHelp => {
                 self.visible = !self.visible;
-                Ok(None)
+                self.scroll = 0;
             }
-            _ => Ok(None),
+            _ => {}
         }
+        Ok(None)
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &RenderContext) {
@@ -207,24 +122,53 @@ impl Component for HelpOverlay {
             return;
         }
 
-        // Calculate centered popup area
-        let popup_area = Self::centered_rect(60, 80, area);
+        let lines = Self::lines();
 
-        // Clear the background
-        frame.render_widget(Clear, popup_area);
+        // As tall as the text needs, within the terminal
+        let wanted_height = lines.len() as u16 + 2;
+        let popup = centered(76, wanted_height.min(area.height.saturating_sub(2)), area);
+        let inner_height = popup.height.saturating_sub(2) as usize;
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // Title
-                Constraint::Min(0),    // Content
-                Constraint::Length(3), // Footer
-            ])
-            .split(popup_area);
+        self.page = inner_height.max(1);
+        self.scroll = self.scroll.min(lines.len().saturating_sub(inner_height));
 
-        self.render_title(frame, chunks[0]);
-        self.render_content(frame, chunks[1]);
-        self.render_footer(frame, chunks[2]);
+        let key_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        let mut hints = vec![Span::raw(" ")];
+        if lines.len() > inner_height {
+            let last = (self.scroll + inner_height).min(lines.len());
+            hints.extend([
+                Span::styled("j/k PgUp/PgDn", key_style),
+                Span::raw(format!(
+                    " scroll ({}-{} of {})  ",
+                    self.scroll + 1,
+                    last,
+                    lines.len()
+                )),
+            ]);
+        }
+        hints.extend([Span::styled("Esc", key_style), Span::raw(" close ")]);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(Span::styled(
+                " VltView keys ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .title_bottom(Line::from(hints));
+
+        let visible: Vec<Line> = lines
+            .into_iter()
+            .skip(self.scroll)
+            .take(inner_height)
+            .collect();
+
+        frame.render_widget(Clear, popup);
+        frame.render_widget(Paragraph::new(visible).block(block), popup);
     }
 
     fn captures_input(&self) -> bool {
@@ -242,16 +186,113 @@ impl Default for HelpOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::tui::context::FocusState;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn test_app() -> App {
+        let config = Config {
+            vault_addr: "http://127.0.0.1:1".to_string(),
+            vault_token: "test-token".to_string(),
+            ..Config::default()
+        };
+        App::new(config, "/".to_string()).unwrap()
+    }
+
+    /// Text on screen after drawing the overlay at the given size
+    fn rendered(overlay: &mut HelpOverlay, width: u16, height: u16) -> Vec<String> {
+        let app = test_app();
+        let focus = FocusState::new();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let ctx = RenderContext::new(&app, &focus, true, area);
+                overlay.draw(frame, area, &ctx);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
 
     #[test]
-    fn test_centered_rect() {
-        let area = Rect::new(0, 0, 100, 50);
-        let centered = HelpOverlay::centered_rect(50, 50, area);
+    fn help_lists_every_binding_from_the_keymap() {
+        let text: String = HelpOverlay::lines()
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
 
-        // Should be roughly centered
-        assert!(centered.x > 0);
-        assert!(centered.y > 0);
-        assert!(centered.width < area.width);
-        assert!(centered.height < area.height);
+        for context in Context::ALL {
+            assert!(text.contains(context.title()), "{context:?}");
+            for binding in keymap::bindings(context) {
+                assert!(text.contains(binding.help), "{}", binding.help);
+            }
+        }
+    }
+
+    #[test]
+    fn every_line_can_be_reached_on_a_small_terminal() {
+        // Regression: the overlay was 80% of the screen with no scrolling,
+        // so at 80x24 more than half of the bindings could not be read.
+        let app = test_app();
+        let focus = FocusState::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ComponentContext::new(&app, &focus, &tx);
+
+        let mut overlay = HelpOverlay::new();
+        overlay.visible = true;
+
+        let first = rendered(&mut overlay, 80, 24).join("\n");
+        assert!(first.contains(Context::Global.title()), "{first}");
+        assert!(!first.contains(Context::Logs.title()));
+        assert!(first.contains("scroll (1-20 of"), "{first}");
+
+        overlay.handle_key(key(KeyCode::End), &ctx).unwrap();
+        let last = rendered(&mut overlay, 80, 24).join("\n");
+        assert!(last.contains(Context::Logs.title()), "{last}");
+        assert!(last.contains("Back to the main screen"), "{last}");
+
+        overlay.handle_key(key(KeyCode::Home), &ctx).unwrap();
+        assert_eq!(overlay.scroll, 0);
+    }
+
+    #[test]
+    fn help_lines_fit_the_popup() {
+        // 76 columns wide, 2 for the border
+        for line in HelpOverlay::lines() {
+            assert!(line.width() <= 74, "too wide: {line:?}");
+        }
+    }
+
+    #[test]
+    fn escape_and_question_mark_close_it() {
+        let app = test_app();
+        let focus = FocusState::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ComponentContext::new(&app, &focus, &tx);
+
+        let mut overlay = HelpOverlay::new();
+        for code in [KeyCode::Esc, KeyCode::Char('?'), KeyCode::Char('q')] {
+            let action = overlay.handle_key(key(code), &ctx).unwrap();
+            assert!(matches!(action, Some(Action::HideHelp)), "{code:?}");
+        }
     }
 }

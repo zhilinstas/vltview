@@ -49,11 +49,15 @@ pub enum Action {
     /// Update UI from current state (after async operations complete)
     StateUpdated,
 
-    /// Move selection up in a list
-    SelectPrevious,
-
-    /// Move selection down in a list
-    SelectNext,
+    /// The navigation cursor now rests on a different item.
+    ///
+    /// `secret` is the full path of the secret under the cursor, or `None`
+    /// when the cursor is on a folder, on `..`, or the list is empty. The
+    /// content pane always shows this selection.
+    SelectionChanged {
+        secret: Option<String>,
+        source: SelectionSource,
+    },
 
     /// Confirm/activate current selection
     SelectConfirm,
@@ -118,8 +122,15 @@ pub enum Action {
     // ═══════════════════════════════════════════════════════════════
     // SECRET ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Load and view a secret (triggers async operation)
-    ViewSecret { path: String, should_focus: bool },
+    /// Load a secret now and show it (triggers async operation)
+    ViewSecret { path: String },
+
+    /// Go into the secret under the cursor: focus the content pane, loading
+    /// the secret first if it is not on screen yet
+    OpenSecret { path: String },
+
+    /// A secret could not be loaded (async completion)
+    SecretLoadFailed { path: String, message: String },
 
     /// Secret loaded successfully (async completion)
     SecretLoaded {
@@ -157,64 +168,20 @@ pub enum Action {
     },
 
     /// Secret version loaded for editing (create new from old)
-    VersionLoadedForEdit { path: String, data: SecretData },
+    VersionLoadedForEdit {
+        path: String,
+        version: u64,
+        data: SecretData,
+    },
 
     /// Create new version from historical version
     CreateFromVersion { path: String, version: u64 },
 
     // ═══════════════════════════════════════════════════════════════
-    // DETAIL VIEW ACTIONS
-    // ═══════════════════════════════════════════════════════════════
-    /// Toggle value visibility in detail view
-    ToggleValueVisibility,
-
-    /// Switch between data and version modes
-    ToggleDetailMode,
-
-    /// Copy selected value to clipboard
-    CopySelectedValue,
-
-    // ═══════════════════════════════════════════════════════════════
     // EDIT VIEW ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Start editing field value
-    StartEditValue,
-
-    /// Start editing field key
-    StartEditKey,
-
-    /// Confirm current field edit
-    ConfirmEdit,
-
-    /// Cancel current edit
+    /// Esc in the edit view: close it, unless a field is being typed
     CancelEdit,
-
-    /// Toggle between key/value editing
-    ToggleEditTarget,
-
-    /// Add new field
-    AddField,
-
-    /// Delete selected field
-    DeleteField,
-
-    // ═══════════════════════════════════════════════════════════════
-    // FILTER ACTIONS
-    // ═══════════════════════════════════════════════════════════════
-    /// Start filter mode
-    StartFilter,
-
-    /// Update filter text
-    UpdateFilter { text: String },
-
-    /// Confirm filter and exit filter mode
-    ConfirmFilter,
-
-    /// Cancel filter (clear and exit mode)
-    CancelFilter,
-
-    /// Clear filter while keeping mode
-    ClearFilter,
 
     // ═══════════════════════════════════════════════════════════════
     // POLICY ACTIONS
@@ -230,9 +197,6 @@ pub enum Action {
 
     /// Policy content loaded
     PolicyLoaded { name: String, content: String },
-
-    /// Copy policy content
-    CopyPolicy,
 
     /// Scroll policy content
     ScrollPolicy { direction: ScrollDirection },
@@ -307,6 +271,17 @@ pub enum ScrollDirection {
     Top,
     /// Scroll to bottom
     Bottom,
+}
+
+/// What moved the navigation cursor
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionSource {
+    /// A cursor key. The first step after a pause loads at once; further
+    /// steps in quick succession wait until the cursor rests.
+    Cursor,
+    /// The list changed under the cursor (reload, filter, navigation). The
+    /// load always waits until the cursor rests.
+    ListChange,
 }
 
 /// Pane focus identifiers

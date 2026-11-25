@@ -6,13 +6,16 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState,
     },
 };
 
 use crate::tui::action::{Action, ScrollDirection};
 use crate::tui::component::Component;
+use crate::tui::components::popup::spinner_frame;
 use crate::tui::context::{ComponentContext, RenderContext};
+use crate::tui::keymap::{self, Context};
 
 /// Policy screen component for viewing Vault ACL policies
 ///
@@ -46,6 +49,15 @@ pub struct PolicyScreen {
 
     /// Error message
     error: Option<String>,
+
+    /// Result of the last copy, shown in the footer until the next key
+    status: Option<String>,
+
+    /// Scroll state of the policy list
+    list_state: ListState,
+
+    /// Rows of policy content shown the last time it was drawn
+    viewport_height: usize,
 }
 
 impl PolicyScreen {
@@ -61,6 +73,9 @@ impl PolicyScreen {
             filtered_policies: Vec::new(),
             is_loading: false,
             error: None,
+            status: None,
+            list_state: ListState::default(),
+            viewport_height: 20,
         }
     }
 
@@ -74,11 +89,6 @@ impl PolicyScreen {
         self.filtered_policies
             .get(self.selected_index)
             .map(|s| s.as_str())
-    }
-
-    /// Get current policy content for copying
-    pub fn current_policy_content(&self) -> Option<&str> {
-        self.policy_content.as_deref()
     }
 
     /// Move selection up (list mode)
@@ -153,9 +163,9 @@ impl PolicyScreen {
         frame.render_widget(title, area);
     }
 
-    fn render_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_list(&mut self, frame: &mut Frame, area: Rect) {
         if self.is_loading {
-            let loading = Paragraph::new("Loading policies...")
+            let loading = Paragraph::new(format!("{} Loading policies…", spinner_frame()))
                 .style(Style::default().fg(Color::Yellow))
                 .block(Block::default().borders(Borders::ALL).title("Policies"));
             frame.render_widget(loading, area);
@@ -183,14 +193,8 @@ impl PolicyScreen {
             .iter()
             .enumerate()
             .map(|(i, policy)| {
-                let style = if i == self.selected_index {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
+                let _ = i;
+                let style = Style::default().fg(Color::White);
 
                 // Add icon based on common policy types
                 let icon = match policy.as_str() {
@@ -208,40 +212,41 @@ impl PolicyScreen {
             })
             .collect();
 
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Policies ({})", self.filtered_policies.len())),
-        );
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Policies ({})", self.filtered_policies.len())),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
 
-        frame.render_widget(list, area);
+        // Stateful, so a long list scrolls with the cursor
+        self.list_state.select(Some(self.selected_index));
+        frame.render_stateful_widget(list, area, &mut self.list_state);
+    }
+
+    /// One footer line: the result of the last copy, or the key hints
+    fn render_hints(&self, frame: &mut Frame, area: Rect, context: Context, extra: String) {
+        let mut line = match &self.status {
+            Some(status) => Line::from(Span::styled(
+                status.clone(),
+                Style::default().fg(Color::Green),
+            )),
+            None => keymap::footer_line(&[context], area.width.saturating_sub(2)),
+        };
+        line.spans.insert(0, Span::raw(" "));
+        line.spans
+            .push(Span::styled(extra, Style::default().fg(Color::DarkGray)));
+        frame.render_widget(Paragraph::new(line), area);
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "↑↓/j/k",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Navigate | "),
-            Span::styled(
-                "Enter",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": View | "),
-            Span::styled(
-                "Esc",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Back"),
-        ]))
-        .block(Block::default().borders(Borders::ALL));
-
-        frame.render_widget(footer, area);
+        self.render_hints(frame, area, Context::Policies, String::new());
     }
 
     fn render_content_header(&self, frame: &mut Frame, area: Rect) {
@@ -346,47 +351,22 @@ impl PolicyScreen {
             .as_ref()
             .map(|c| c.lines().count())
             .unwrap_or(0);
-        let viewport_height = area.height.saturating_sub(8) as usize;
-        let scroll_info = if content_lines > viewport_height {
-            format!(" | Line {}/{}", self.scroll_offset + 1, content_lines)
+        let scroll_info = if content_lines > self.viewport_height {
+            format!("  line {}/{}", self.scroll_offset + 1, content_lines)
         } else {
             String::new()
         };
 
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "↑↓/j/k",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Scroll | "),
-            Span::styled(
-                "y",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Copy | "),
-            Span::styled(
-                "Esc",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Back"),
-            Span::styled(scroll_info, Style::default().fg(Color::DarkGray)),
-        ]))
-        .block(Block::default().borders(Borders::ALL));
-
-        frame.render_widget(footer, area);
+        self.render_hints(frame, area, Context::PolicyContent, scroll_info);
     }
 
-    fn render_list_view(&self, frame: &mut Frame, area: Rect) {
+    fn render_list_view(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // Header
                 Constraint::Min(0),    // List
-                Constraint::Length(3), // Footer
+                Constraint::Length(1), // Footer
             ])
             .split(area);
 
@@ -395,15 +375,25 @@ impl PolicyScreen {
         self.render_footer(frame, chunks[2]);
     }
 
-    fn render_content_view(&self, frame: &mut Frame, area: Rect) {
+    fn render_content_view(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // Header
                 Constraint::Min(0),    // Content
-                Constraint::Length(3), // Footer
+                Constraint::Length(1), // Footer
             ])
             .split(area);
+
+        // Scrolling works in rows of the content area as it is on screen
+        self.viewport_height = chunks[1].height.saturating_sub(2) as usize;
+        let max_offset = self
+            .policy_content
+            .as_ref()
+            .map(|c| c.lines().count())
+            .unwrap_or(0)
+            .saturating_sub(self.viewport_height);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
 
         self.render_content_header(frame, chunks[0]);
         self.render_content(frame, chunks[1]);
@@ -413,6 +403,11 @@ impl PolicyScreen {
 
 impl Component for PolicyScreen {
     fn handle_key(&mut self, key: KeyEvent, _ctx: &ComponentContext) -> Result<Option<Action>> {
+        // A status line stays until the next key
+        self.status = None;
+
+        let scroll = |direction| Ok(Some(Action::ScrollPolicy { direction }));
+
         // Different key handling based on mode
         if self.is_viewing_content() {
             // Content view mode
@@ -429,8 +424,20 @@ impl Component for PolicyScreen {
                     }))
                 }
 
+                (KeyCode::PageDown, _) => scroll(ScrollDirection::PageDown),
+                (KeyCode::PageUp, _) => scroll(ScrollDirection::PageUp),
+                (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                    scroll(ScrollDirection::Top)
+                }
+                (KeyCode::End, _) | (KeyCode::Char('G'), _) => scroll(ScrollDirection::Bottom),
+
                 // Copy policy content
-                (KeyCode::Char('y'), KeyModifiers::NONE) => Ok(Some(Action::CopyPolicy)),
+                (KeyCode::Char('y'), KeyModifiers::NONE) => {
+                    Ok(self.policy_content.clone().map(|text| {
+                        self.status = Some("Policy copied to clipboard".to_string());
+                        Action::CopyToClipboard { text }
+                    }))
+                }
 
                 // Back to list
                 (KeyCode::Esc, KeyModifiers::NONE) => {
@@ -456,6 +463,24 @@ impl Component for PolicyScreen {
                 }
                 (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, KeyModifiers::NONE) => {
                     self.move_up();
+                    Ok(None)
+                }
+
+                (KeyCode::PageDown, _) => {
+                    let last = self.filtered_policies.len().saturating_sub(1);
+                    self.selected_index = (self.selected_index + 10).min(last);
+                    Ok(None)
+                }
+                (KeyCode::PageUp, _) => {
+                    self.selected_index = self.selected_index.saturating_sub(10);
+                    Ok(None)
+                }
+                (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                    self.selected_index = 0;
+                    Ok(None)
+                }
+                (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
+                    self.selected_index = self.filtered_policies.len().saturating_sub(1);
                     Ok(None)
                 }
 
@@ -506,18 +531,19 @@ impl Component for PolicyScreen {
 
             // Scroll policy content
             Action::ScrollPolicy { direction } => {
-                let viewport_height = 30; // Will be calculated from terminal size in practice
+                let viewport_height = self.viewport_height;
+                let page_steps = (viewport_height / 5).max(1);
 
                 match direction {
                     ScrollDirection::Up => self.scroll_up(),
                     ScrollDirection::Down => self.scroll_down(viewport_height),
                     ScrollDirection::PageUp => {
-                        for _ in 0..5 {
+                        for _ in 0..page_steps {
                             self.scroll_up();
                         }
                     }
                     ScrollDirection::PageDown => {
-                        for _ in 0..5 {
+                        for _ in 0..page_steps {
                             self.scroll_down(viewport_height);
                         }
                     }

@@ -27,7 +27,7 @@ Things to know about the upgrade:
   bundled Mozilla roots, so private CAs installed on the machine are trusted.
 - tui-textarea was replaced by ratatui-textarea (the ratatui org's fork),
   serde_yaml by serde_norway, chrono by jiff, dirs and once_cell by std.
-- The clippy gate passes `-A dead_code` for now (see step 4).
+- The clippy gate passes `-A dead_code` for now (see step 5).
 
 ## Step 2: release blockers
 
@@ -81,19 +81,25 @@ Behaviour changes to put in the changelog:
 - [ ] No panic hook: panic messages are lost in the alternate screen
 - [ ] `--insecure` warning is printed after the alternate screen is entered,
       so it is never visible
-- [ ] Bracketed paste is off: pasted text runs as commands (`d` then `y`
-      confirms a permanent delete)
+- [x] Bracketed paste is off: pasted text runs as commands (`d` then `y`
+      confirms a permanent delete). Fixed with step 4: a paste goes into the
+      text input that has focus and is dropped anywhere else
 - [ ] History back/forward ping-pongs between two paths; forward never works
 - [ ] Refresh/navigate race can leave one directory's items under another path
-- [ ] Edit view accepts newline, empty and duplicate keys (Ctrl+S on a new
-      secret with an unnamed field still sends `{"": ""}`)
+- [ ] Edit view accepts empty and duplicate keys (Ctrl+S on a new secret
+      with an unnamed field still sends `{"": ""}`). Newlines in keys were
+      fixed with step 4
 - [ ] Unsaved edits are discarded without confirmation (`has_changes` is never
       read)
-- [ ] Policy screen: errors land on the main screen, viewport height is
-      hard-coded to 30, the list does not scroll, `y` (copy) is a no-op
-- [ ] Log screen: first scroll jumps to the top; same hard-coded viewport
-- [ ] Detail view cannot be closed (`ScreenBack` is never forwarded)
-- [ ] Long field/version lists have no scrolling
+- [x] Policy screen: errors land on the main screen, viewport height is
+      hard-coded to 30, the list does not scroll, `y` (copy) is a no-op.
+      Fixed with step 4; list scrolling has no test
+- [x] Log screen: first scroll jumps to the top; same hard-coded viewport.
+      Fixed with step 4
+- [x] Detail view cannot be closed (`ScreenBack` is never forwarded).
+      Settled with step 4: Esc returns to the list, and the pane shows
+      whatever the cursor is on
+- [x] Long field/version lists have no scrolling. Fixed with step 4
 - [ ] Masking shows the first and last character and the exact length; the
       edit view shows every value in clear
 - [ ] False "token provided via command-line argument" warning when the token
@@ -105,23 +111,175 @@ Behaviour changes to put in the changelog:
 - [ ] Token `Zeroize` is nominal: the token is cloned into three
       `AuthManager`s and stays in `Config`
 
-## Step 4: cleanup
+## Step 4: UX
 
-- [ ] Wire up or delete the 20 dead-code items, then drop `-A dead_code` from
-      the clippy task in `mise.toml`
-  - Emitted but never handled: `SecretSaved`, `SecretDeleted`, `CopyPolicy`,
-    `SelectNext`, `SelectPrevious`, `ScreenBack` from the detail view
+Status: U1 to U19 done locally, not committed. The suite went from 91 to
+164 tests, and `mise run ci` is green. Also driven in a real 80x24 terminal
+(tmux) against the dev Vault: preview, filter, value viewer, history, create,
+edit, save, restore from an old version, delete, policies, logs and the
+startup screen. A burst of ten cursor steps made 2 reads (before, from code:
+one per step). Not checked live: KV v1, a namespace in the header, and a
+secret under the cursor at startup (the dev Vault's root holds only folders).
+
+The findings were from code (a read of `src/tui`); row and column counts
+were computed from the layout constraints.
+
+Changes to put in the changelog:
+
+- The screen is laid out differently: one header line and one footer line,
+  and the secret is a single block. The screenshots in the README are out of
+  date.
+- Enter in a field now finishes the field; a line break in a value is
+  Alt+Enter or Ctrl+J. Ctrl+S saves the secret from anywhere in the editor.
+- Deleting a secret is confirmed with `y` only.
+- Esc in the secret pane returns to the list; the pane always shows what the
+  cursor is on.
+- `q`, `p`, `r` and `~` do nothing while the editor has focus.
+
+Fixed on the way, because the same code was being rewritten (ticked in
+step 3): bracketed paste, list scrolling, the policy and log screen items,
+and closing the detail view.
+
+### Selection and preview (0.3.0)
+
+Decision: keep preview-on-navigation. The cursor is the selection and the
+content pane shows what is selected; Enter is not needed to see a secret.
+Today this is half implemented, which is what the items below fix.
+
+- [x] **U1 Preview follows the selection, not the keypress.** Preview fires
+      only on `j`/`k` (`navigation_pane.rs:311`). Fire it on every selection
+      change: entering a folder, refresh, save, delete, filter. Clear the pane
+      when the cursor is on a folder or `..`.
+- [x] **U2 Keep the selection across reloads.** Every reload resets the cursor
+      to row 0 (`navigation_pane.rs:395`) while the pane keeps the old secret,
+      so the two can name different secrets. Reselect by name; after going up,
+      land on the folder just left; after a delete, land on the neighbour.
+- [x] **U3 Debounce preview by about 200ms.** Each cursor step makes two
+      requests (data and metadata) with no debounce, so holding `j` reads
+      every secret in the folder and puts each one in Vault's audit log.
+- [x] **U4 Enter goes into the secret.** It only moves focus today
+      (`navigation_pane.rs:163`). It should move focus and, if the debounced
+      load has not fired yet, load at once. The empty state says "Press Enter
+      on a secret", which currently loads nothing.
+- [x] **U5 Clear the pane on delete.** The pane keeps showing the deleted
+      secret, which can then be edited and saved back (`SecretDeleted` is
+      unhandled, see step 5).
+
+Not planned: an `auto_preview: false` config option for environments where
+every read of a production secret is reviewed. Add it only on request; the
+pane would show "Press Enter to load" in that mode.
+
+### Destructive actions and feedback (0.3.0)
+
+- [x] **U6 Delete dialog.** Delete destroys all versions and metadata
+      (`kv.rs:151`) and Enter confirms it. The dialog is 30% of the screen
+      height (`main_screen.rs:383`), so at 80x24 the path and the warning do
+      not fit. Use a fixed-size dialog, confirm with `y` only, and show the
+      version count.
+- [x] **U7 Loading indicator.** `is_loading` is set and never drawn, so the
+      previous secret stays on screen while the next one loads (the request
+      timeout is 30s). The policy screen shows "No policies found" while
+      loading.
+- [x] **U8 Startup feedback.** The screen is blank until the first list
+      returns (`tui/mod.rs:74`). Draw a "Connecting to <addr>" frame first.
+
+### Layout and orientation
+
+- [x] **U9 Layout assumes a large terminal.** At 80x24, 15 rows are headers,
+      footers and borders, leaving 7 rows for fields (with no scrolling, see
+      step 3). Move headers into border titles and use one borderless footer
+      line. The path is shown twice.
+- [x] **U10 Footers and metadata are clipped at 80 columns.** The edit footer
+      is about 70 characters in a 50-column pane, so "Ctrl+s: Save secret" is
+      cut off; the detail footer loses "Values MASKED"; the metadata line
+      loses "Modified".
+- [x] **U11 Help overlay does not fit.** 30 lines in about 13 rows at 80x24,
+      with no scrolling.
+- [x] **U12 Focus is hard to see.** The detail and edit views ignore
+      `is_focused`, and both panes show a cyan selection at once
+      (`screenshots/2.png`). Only the `[NAV]`/`[CONTENT]` tag tells them
+      apart.
+- [x] **U13 Hints come from one keymap table.** The main footer always shows
+      `n`/`d`, even when the content pane has focus and they do nothing. The
+      help overlay omits Tab, `b`/`f` and every edit and version key (its
+      wrong `h` and `c` entries are in step 5). Generate footers and help
+      from the same table, per context.
+- [x] **U14 Header shows no Vault address or namespace**, so nothing says
+      which cluster is being edited.
+
+### Flow friction
+
+- [x] **U15 Filter.**
+  - After typing, the cursor sits on `..`, so Enter, Enter goes up a folder;
+    put it on the first match
+  - The filter persists into subfolders; clear it on navigation
+  - The hint says "/ to edit" but `/` clears the text
+    (`navigation_pane.rs:363`)
+  - "No secrets at this path" is shown when the filter hides everything
+- [x] **U16 Reading values.**
+  - Long and multi-line values cannot be read without entering edit mode;
+    add a value viewer with wrap and scroll
+  - The key column is fixed at 20 characters
+  - Reveal is all-or-nothing and resets on every selection; add a per-field
+    peek
+- [x] **U17 Editing.**
+  - Saving takes Ctrl+S twice (confirm field, then save secret)
+  - `q`, `p` and `r` stay live in the edit view, so `q` quits with unsaved
+    changes (related: the discard confirmation in step 3)
+  - Creating a secret under an existing name silently writes a new version
+  - The name prompt has no cursor movement
+  - A validation error replaces the whole content pane, hiding the edit
+- [x] **U18 Old versions.** The only cue is a missing "(current)" label, and
+      `e` then save is a silent rollback. Show a "viewing v3 of 7" banner and
+      say so before saving.
+- [x] **U19 Navigation list.**
+  - Folders and secrets look identical apart from a trailing `/`; list
+    folders first and style them
+  - No PgUp/PgDn, `g`/`G` or position indicator
+  - Timestamps are UTC with no label
+
+How it was done, where that is not obvious from the item:
+
+- U3: the first step after a pause loads at once and later steps wait for
+  the cursor to rest, so a single step is not slowed down. A selection moved
+  by a reload or by the filter always waits.
+- U7: "busy" is whether any request is in flight (`AsyncManager`), shown as a
+  spinner in the header. A selected secret that has not arrived is a
+  "Loading" placeholder, never the previous secret.
+- U13: `src/tui/keymap.rs` holds the hints for every context. The key
+  dispatch is still in each component's `handle_key`, so a changed binding
+  has to be changed in both places.
+- U16: masking itself is unchanged (see step 3).
+- U17: the discard confirmation is still open (step 3). `q` no longer quits
+  from inside the editor, but Esc there, and `q` from the list with an edit
+  open, still drop the changes without asking.
+
+### Feature candidates (not scheduled)
+
+- Recursive search or a go-to-path prompt
+- Version diff
+- Copy the whole secret as JSON or env
+- Soft delete (latest version only) with undelete
+- Move and rename
+
+## Step 5: cleanup
+
+- [ ] Wire up or delete the remaining dead-code items, then drop
+      `-A dead_code` from the clippy task in `mise.toml`. Step 4 dealt with
+      the emitted-but-unhandled actions, the scroll directions and
+      `is_loading`; what is left:
   - Handled but never emitted: `ShowMainScreen`, `HideCreateSecretInput`,
-    `StartEditKey`, `ClearStatus`, `ClearError`, the page/top/bottom scroll
-    directions
+    `ClearStatus`, `ClearError`
   - Never constructed: `Tick`, `Render`, `Resize`, `Suspend`, `Resume`,
     `SelectConfirm`, `FocusNext`, `FocusPrevious`, `ConfirmationAccepted`,
-    `ConfirmationRejected`, `ClearFilter`, `CopyComplete`, `TextInput`, `Noop`
-  - Scaffolding: `FocusState`, the `CacheManager` stub, `is_loading`,
-    `OperationId`, unused `VaultClient` getters, `redact_secret_value`
+    `ConfirmationRejected`, `CopyComplete`, `TextInput`, `Noop`
+  - Scaffolding: `FocusState`, the `CacheManager` stub, `OperationId`,
+    unused `VaultClient` getters, `redact_secret_value`,
+    `DetailViewComponent::mode`, `EditViewComponent::get_data`
 - [ ] Reconcile CLAUDE.md and README with the code: KV v1 support, caching,
-      audit logging, `SecretService`/`NavigationController` responsibilities,
-      help overlay bindings (`h`, `c`)
+      audit logging, `SecretService`/`NavigationController` responsibilities.
+      The key bindings are done (step 4); the README screenshots need
+      retaking
 - [ ] README documents `insecure_skip_verify`; the real config key is
       `insecure`
 - [ ] Dev environment: the docker-compose seed step fails (`vault-init.sh`
@@ -131,7 +289,7 @@ Behaviour changes to put in the changelog:
 - [ ] Tests: extend coverage of key routing and the HTTP client (step 2
       added the first of both); nothing covers the policy client yet
 
-## Step 5: release engineering
+## Step 6: release engineering
 
 - [ ] Replace the archived `actions/create-release@v1` and
       `actions/upload-release-asset@v1` with `gh release`

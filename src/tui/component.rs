@@ -27,6 +27,14 @@ pub trait Component: Send {
     /// can handle specific keys and let others bubble up to the parent.
     fn handle_key(&mut self, key: KeyEvent, ctx: &ComponentContext) -> Result<Option<Action>>;
 
+    /// Handle text pasted into the terminal (bracketed paste)
+    ///
+    /// Pasted text is data, never commands: a component that has a text
+    /// input in focus inserts it there, and everything else ignores it.
+    fn handle_paste(&mut self, _text: &str, _ctx: &ComponentContext) -> Result<Option<Action>> {
+        Ok(None)
+    }
+
     /// Update component state based on an action
     ///
     /// Returns optional follow-up action. This enables action chaining where

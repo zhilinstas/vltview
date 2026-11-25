@@ -108,6 +108,19 @@ impl AsyncManager {
         actions
     }
 
+    /// Whether any operation is still running
+    pub fn has_pending(&self) -> bool {
+        self.pending_ops
+            .values()
+            .any(|handle| !handle.is_finished())
+    }
+
+    /// Number of operations spawned so far
+    #[cfg(test)]
+    pub fn spawned_count(&self) -> u64 {
+        self.next_op_id
+    }
+
     /// Cancel all pending operations
     ///
     /// Useful when shutting down or switching contexts where pending operations

@@ -132,19 +132,35 @@ insecure_skip_verify: false
 
 ### Key Bindings
 
-| Key | Action |
-|-----|--------|
-| `↑/↓` or `j/k` | Navigate items |
-| `Enter` | Select/Open item |
-| `Backspace` | Go back |
-| `Tab` | Switch between list/detail |
-| `p` | View policies |
-| `/` | Search/Filter |
-| `c` | Copy value to clipboard |
-| `r` | Refresh current view |
-| `?` | Show help |
-| `q` | Quit screen |
-| `Ctrl+C` | Quit application |
+The footer always shows the keys that work where you are, and `?` lists all
+of them. The main ones:
+
+| Where | Key | Action |
+|-------|-----|--------|
+| Anywhere | `Tab`, `h`/`l` | Switch between the list and the secret |
+| | `r` | Reload the current folder |
+| | `p` / `~` | Policies / application logs |
+| | `?` | Help |
+| | `q`, `Ctrl+C` | Quit |
+| List | `↑/↓` or `j/k`, `PgUp/PgDn`, `g/G` | Move; the secret under the cursor is shown |
+| | `Enter` | Open the folder, or go into the secret |
+| | `Backspace` | Parent folder |
+| | `/` | Filter the folder (`Esc` clears) |
+| | `n` / `d` | New secret / delete secret |
+| | `y` | Copy the path |
+| Secret | `Space` / `v` | Reveal the selected value / every value |
+| | `Enter` | Show the whole value |
+| | `c` | Copy the selected value |
+| | `e` | Edit |
+| | `l` | Version history |
+| Editor | `Enter` | Edit the value; in a field, done |
+| | `Alt+Enter`, `Ctrl+J` | Line break in a value |
+| | `r` / `a` / `d` | Rename key / add field / delete field |
+| | `Ctrl+S` | Save the secret |
+| | `Esc` | Discard the field being typed, or close the editor |
+
+Moving the cursor onto a secret reads it from Vault once the cursor rests
+there, so scrolling through a folder does not read every secret on the way.
 
 ## Development
 

@@ -11,6 +11,7 @@ use ratatui::{
 use crate::tui::action::{Action, ScrollDirection};
 use crate::tui::component::Component;
 use crate::tui::context::{ComponentContext, RenderContext};
+use crate::tui::keymap::{self, Context};
 use crate::tui::log_buffer::{clear_logs, get_logs};
 
 /// Log viewer screen component
@@ -21,6 +22,8 @@ pub struct LogScreen {
     scroll_offset: usize,
     /// Whether to automatically scroll to newest logs
     auto_scroll: bool,
+    /// Rows of log shown the last time the screen was drawn
+    viewport_height: usize,
 }
 
 impl LogScreen {
@@ -29,6 +32,7 @@ impl LogScreen {
         Self {
             scroll_offset: 0,
             auto_scroll: true,
+            viewport_height: 20,
         }
     }
 
@@ -84,8 +88,9 @@ impl LogScreen {
         frame.render_widget(title, area);
     }
 
-    fn render_content(&self, frame: &mut Frame, area: Rect) {
+    fn render_content(&mut self, frame: &mut Frame, area: Rect) {
         let logs = get_logs();
+        self.viewport_height = area.height.saturating_sub(2) as usize;
 
         if logs.is_empty() {
             let empty = Paragraph::new(vec![
@@ -163,38 +168,9 @@ impl LogScreen {
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let help = Line::from(vec![
-            Span::styled(
-                "j/k",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Scroll | "),
-            Span::styled(
-                "a",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Auto-scroll | "),
-            Span::styled(
-                "c",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Clear | "),
-            Span::styled(
-                "Esc/~",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Close"),
-        ]);
-
-        let footer = Paragraph::new(help).block(Block::default().borders(Borders::ALL));
-
-        frame.render_widget(footer, area);
+        let mut line = keymap::footer_line(&[Context::Logs], area.width.saturating_sub(2));
+        line.spans.insert(0, Span::raw(" "));
+        frame.render_widget(Paragraph::new(line), area);
     }
 }
 
@@ -212,6 +188,21 @@ impl Component for LogScreen {
                     direction: ScrollDirection::Up,
                 }))
             }
+
+            (KeyCode::PageDown, _) => Ok(Some(Action::ScrollLogs {
+                direction: ScrollDirection::PageDown,
+            })),
+            (KeyCode::PageUp, _) => Ok(Some(Action::ScrollLogs {
+                direction: ScrollDirection::PageUp,
+            })),
+            (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                Ok(Some(Action::ScrollLogs {
+                    direction: ScrollDirection::Top,
+                }))
+            }
+            (KeyCode::End, _) | (KeyCode::Char('G'), _) => Ok(Some(Action::ScrollLogs {
+                direction: ScrollDirection::Bottom,
+            })),
 
             // Auto-scroll toggle
             (KeyCode::Char('a'), KeyModifiers::NONE) => Ok(Some(Action::ToggleAutoScroll)),
@@ -235,18 +226,26 @@ impl Component for LogScreen {
         match action {
             Action::ScrollLogs { direction } => {
                 let logs = get_logs();
-                let viewport_height = 30; // Will be calculated from terminal size in practice
+                let viewport_height = self.viewport_height;
+                let page_steps = (viewport_height / 5).max(1);
+
+                // While following, the offset is not kept up to date. Start
+                // from what is on screen, so the first scroll moves from
+                // there instead of jumping to the oldest entry.
+                if self.auto_scroll {
+                    self.scroll_offset = logs.len().saturating_sub(viewport_height);
+                }
 
                 match direction {
                     ScrollDirection::Up => self.scroll_up(),
                     ScrollDirection::Down => self.scroll_down(logs.len(), viewport_height),
                     ScrollDirection::PageUp => {
-                        for _ in 0..5 {
+                        for _ in 0..page_steps {
                             self.scroll_up();
                         }
                     }
                     ScrollDirection::PageDown => {
-                        for _ in 0..5 {
+                        for _ in 0..page_steps {
                             self.scroll_down(logs.len(), viewport_height);
                         }
                     }
@@ -281,7 +280,7 @@ impl Component for LogScreen {
             .constraints([
                 Constraint::Length(3), // Header
                 Constraint::Min(0),    // Content
-                Constraint::Length(3), // Footer
+                Constraint::Length(1), // Footer
             ])
             .split(area);
 
@@ -335,5 +334,43 @@ mod tests {
 
         screen.enable_auto_scroll();
         assert!(screen.auto_scroll);
+    }
+
+    #[test]
+    fn first_scroll_starts_from_what_is_on_screen() {
+        // Regression: while following, the offset stayed at 0, so the first
+        // `k` jumped from the newest entries to the oldest.
+        use crate::tui::log_buffer::add_log;
+
+        for i in 0..40 {
+            add_log("INFO", "test", format!("entry {i}"));
+        }
+        let total = get_logs().len();
+
+        let app = crate::app::App::new(
+            crate::config::Config {
+                vault_addr: "http://127.0.0.1:1".to_string(),
+                vault_token: "test-token".to_string(),
+                ..Default::default()
+            },
+            "/".to_string(),
+        )
+        .unwrap();
+        let focus = crate::tui::context::FocusState::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut ctx = ComponentContext::new(&app, &focus, &tx);
+
+        let mut screen = LogScreen::new();
+        screen.viewport_height = 10;
+        assert!(screen.auto_scroll);
+
+        let up = Action::ScrollLogs {
+            direction: ScrollDirection::Up,
+        };
+        screen.update(up, &mut ctx).unwrap();
+
+        // One step (five lines) above the last page, not at the top
+        assert_eq!(screen.scroll_offset, total - 10 - 5);
+        assert!(!screen.auto_scroll);
     }
 }
