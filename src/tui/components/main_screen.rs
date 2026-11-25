@@ -159,6 +159,16 @@ impl MainScreen {
             .is_some_and(|edit| edit.has_unsaved_changes())
     }
 
+    /// The error message over the screen, if one is shown now. While an
+    /// editor is open the messages wait: they are not about that edit, and
+    /// the editor keeps the keyboard. They are shown once it is closed.
+    fn shown_notice(&self) -> Option<&str> {
+        match self.edit_view {
+            Some(_) => None,
+            None => self.notices.front().map(String::as_str),
+        }
+    }
+
     /// Close the editor; what was underneath is shown again
     fn close_editor(&mut self) {
         self.edit_view = None;
@@ -189,7 +199,7 @@ impl MainScreen {
 
     /// The keys that work right now, for the footer
     fn footer_contexts(&self) -> Vec<Context> {
-        if !self.notices.is_empty() {
+        if self.shown_notice().is_some() {
             return vec![Context::Notice];
         }
         match self.discard_prompt {
@@ -651,7 +661,7 @@ impl Component for MainScreen {
         self.status_message = None;
 
         // An error message is read and closed before anything else
-        if !self.notices.is_empty() {
+        if self.shown_notice().is_some() {
             self.handle_notice(key);
             return Ok(None);
         }
@@ -776,7 +786,7 @@ impl Component for MainScreen {
         // one. Anywhere else it is dropped: it must never run as commands.
         if self.delete_confirmation.is_some()
             || self.discard_prompt.is_some()
-            || !self.notices.is_empty()
+            || self.shown_notice().is_some()
         {
             return Ok(None);
         }
@@ -1166,18 +1176,19 @@ impl Component for MainScreen {
         }
 
         // An error message is on top of everything
-        if let Some(message) = self.notices.front() {
+        if let Some(message) = self.shown_notice() {
             Self::render_notice(frame, area, message, self.notices.len() - 1);
         }
     }
 
     fn captures_input(&self) -> bool {
         // Capture input in create secret mode, in the delete confirmation
-        // and while an error message is shown
+        // and while an error message is shown (not while it waits for the
+        // editor to be closed)
         self.create_input.is_some()
             || self.delete_confirmation.is_some()
             || self.discard_prompt.is_some()
-            || !self.notices.is_empty()
+            || self.shown_notice().is_some()
     }
 }
 
@@ -2064,7 +2075,7 @@ mod tests {
     }
 
     #[test]
-    fn an_error_about_something_else_never_lands_in_an_open_editor() {
+    fn an_error_about_something_else_waits_until_the_editor_is_closed() {
         // Regression: errors carried no hint of what they were about, so
         // whatever failed was shown inside the editor that happened to be
         // open, as if the edit had caused it.
@@ -2091,20 +2102,26 @@ mod tests {
                 screen.update(Action::EditSecret, ctx).unwrap();
                 screen.update(error.clone(), ctx).unwrap();
 
-                // Said over the screen, naming what it is about
+                // Not over the editor: it is not about this edit, and the
+                // editor keeps its keys
+                let screen_text = text(screen, ctx, 80, 24);
+                assert!(!screen_text.contains("Access denied"), "{screen_text}");
+                assert!(screen_text.contains("api_key"), "{screen_text}");
+                assert!(!screen.captures_input());
+                screen.handle_key(key(KeyCode::Down), ctx).unwrap();
+                assert_eq!(screen.edit_view.as_ref().unwrap().path(), "/a");
+
+                // Once the editor is closed it is said over the screen,
+                // naming what it is about
+                press(screen, ctx, KeyCode::Esc);
+                assert!(screen.edit_view.is_none());
                 let screen_text = text(screen, ctx, 80, 24);
                 assert!(screen_text.contains(" Error "), "{screen_text}");
                 assert!(
                     screen_text.contains("/other: Access denied"),
                     "{screen_text}"
                 );
-
-                // Closed, it leaves the editor as it was, with no error in it
-                screen.handle_key(key(KeyCode::Esc), ctx).unwrap();
-                let screen_text = text(screen, ctx, 80, 24);
-                assert!(!screen_text.contains("Access denied"), "{screen_text}");
-                assert!(screen_text.contains("api_key"), "{screen_text}");
-                assert_eq!(screen.edit_view.as_ref().unwrap().path(), "/a");
+                assert!(screen.captures_input());
             });
         }
     }

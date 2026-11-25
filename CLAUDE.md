@@ -296,7 +296,7 @@ Environment variables:
 ### Error Handling
 - Use `anyhow::Result` for most operations
 - A failed request comes back as an action that says what failed (`SecretLoadFailed`, `SaveFailed`, `DeleteFailed`, `FolderListFailed`, `VersionLoadFailed`, `PolicyLoadFailed`, ...), with a message that names the path or policy. There is no catch-all error action
-- An error is shown where its subject is: a failed load in the content pane while that secret is selected, a failed save inside the editor it came from, a policy error on the policy screen. Anything else (a folder that would not open, a failed delete or copy) is a message over the main screen (`MainScreen::notices`). A failed read of something the user has left is dropped
+- An error is shown where its subject is: a failed load in the content pane while that secret is selected, a failed save inside the editor it came from, a policy error on the policy screen. Anything else (a folder that would not open, a failed delete or copy) is a message over the main screen (`MainScreen::notices`); while an editor is open, such a message waits and is shown when the editor is closed. A failed read of something the user has left is dropped
 - Components display errors in UI, don't panic
 
 ### Terminal Lifecycle
