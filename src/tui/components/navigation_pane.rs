@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
 use crate::app::App;
@@ -33,8 +33,8 @@ pub struct NavigationPane {
     /// Currently selected index (into items list)
     selected_index: usize,
 
-    /// Vertical scroll offset (first visible item index)
-    scroll_offset: usize,
+    /// Scroll state of the list: it keeps the cursor on screen
+    list_state: ListState,
 
     /// Filter input text
     filter_input: String,
@@ -63,7 +63,7 @@ impl NavigationPane {
             items: Vec::new(),
             total: 0,
             selected_index: 0,
-            scroll_offset: 0,
+            list_state: ListState::default(),
             filter_input: String::new(),
             filter_mode: false,
             loaded_path: String::new(),
@@ -132,7 +132,7 @@ impl NavigationPane {
             // A filter belongs to the folder it was typed in
             self.filter_input.clear();
             self.filter_mode = false;
-            self.scroll_offset = 0;
+            *self.list_state.offset_mut() = 0;
         }
 
         self.rebuild_items(app);
@@ -166,7 +166,7 @@ impl NavigationPane {
         self.rebuild_items(app);
         // Row 0 is `..` when there is a parent; the first match comes after it
         self.selected_index = usize::from(self.has_parent() && self.items.len() > 1);
-        self.scroll_offset = 0;
+        *self.list_state.offset_mut() = 0;
         self.announce(SelectionSource::ListChange)
     }
 
@@ -178,20 +178,6 @@ impl NavigationPane {
         self.rebuild_items(app);
         self.selected_index = selected.and_then(|name| self.position(&name)).unwrap_or(0);
         self.announce(SelectionSource::ListChange)
-    }
-
-    /// Adjust scroll offset to keep selected item visible within viewport
-    fn adjust_scroll(&mut self, viewport_height: usize) {
-        if self.items.is_empty() || viewport_height == 0 {
-            self.scroll_offset = 0;
-            return;
-        }
-
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        } else if self.selected_index >= self.scroll_offset + viewport_height {
-            self.scroll_offset = self.selected_index + 1 - viewport_height;
-        }
     }
 
     /// Move the cursor to `index`, clamped to the list
@@ -449,12 +435,8 @@ impl Component for NavigationPane {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &RenderContext) {
         let focused = ctx.is_focused;
 
-        // Viewport height (subtract 2 for borders)
-        let viewport_height = area.height.saturating_sub(2) as usize;
-        self.viewport_height = viewport_height;
-
-        // Adjust scroll to keep selected item visible
-        self.adjust_scroll(viewport_height);
+        // Rows for items (the block's borders take two), for paging
+        self.viewport_height = area.height.saturating_sub(2) as usize;
 
         let block = self.create_block(focused);
 
@@ -471,14 +453,12 @@ impl Component for NavigationPane {
             return;
         }
 
-        let end_index = (self.scroll_offset + viewport_height).min(self.items.len());
-        let visible_items = &self.items[self.scroll_offset..end_index];
-
-        let mut list_items: Vec<ListItem> = visible_items
+        let mut list_items: Vec<ListItem> = self
+            .items
             .iter()
             .enumerate()
             .map(|(i, item)| {
-                let is_selected = self.scroll_offset + i == self.selected_index;
+                let is_selected = i == self.selected_index;
 
                 // Folders, secrets and `..` each look different
                 let style = if is_selected {
@@ -509,7 +489,13 @@ impl Component for NavigationPane {
             );
         }
 
-        frame.render_widget(List::new(list_items).block(block), area);
+        // Stateful, so a long folder scrolls with the cursor
+        // (the block borrows the filter text, so the state is put back
+        // once the list has been drawn)
+        let mut list_state = self.list_state;
+        list_state.select(Some(self.selected_index));
+        frame.render_stateful_widget(List::new(list_items).block(block), area, &mut list_state);
+        self.list_state = list_state;
     }
 
     fn captures_input(&self) -> bool {
@@ -811,6 +797,68 @@ mod tests {
             assert_eq!(pane.selected_index, 49);
             pane.handle_key(key(KeyCode::Char('g')), ctx).unwrap();
             assert_eq!(pane.selected_index, 0);
+        });
+    }
+
+    /// The pane as drawn in the left column of an 80x24 terminal
+    fn rendered(pane: &mut NavigationPane, app: &App) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (width, height) = (28, 22);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                pane.draw(frame, area, &RenderContext::new(app, true));
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_long_folder_scrolls_with_the_cursor() {
+        let names: Vec<String> = (0..60).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let app = test_app("/", &refs);
+        with_pane(&app, |pane, ctx, _| {
+            let screen = rendered(pane, ctx.app);
+            assert!(screen.contains(" s00 "), "{screen}");
+            assert!(!screen.contains(" s59 "), "{screen}");
+
+            pane.handle_key(key(KeyCode::End), ctx).unwrap();
+            let screen = rendered(pane, ctx.app);
+            assert!(screen.contains(" s59 "), "{screen}");
+            assert!(!screen.contains(" s00 "), "{screen}");
+            assert!(screen.contains(" 60/60 "), "{screen}");
+
+            pane.handle_key(key(KeyCode::Home), ctx).unwrap();
+            let screen = rendered(pane, ctx.app);
+            assert!(screen.contains(" s00 "), "{screen}");
+        });
+    }
+
+    #[test]
+    fn a_new_folder_is_shown_from_its_top() {
+        // The scroll position of the folder left behind must not carry over
+        let names: Vec<String> = (0..60).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let app = test_app("/", &refs);
+        with_pane(&app, |pane, ctx, _| {
+            pane.handle_key(key(KeyCode::End), ctx).unwrap();
+            rendered(pane, ctx.app);
+
+            show_folder(ctx.app, "/other", &refs);
+            pane.update(Action::StateUpdated, ctx).unwrap();
+            let screen = rendered(pane, ctx.app);
+            assert!(screen.contains(" .. "), "{screen}");
+            assert!(screen.contains(" s00 "), "{screen}");
         });
     }
 }

@@ -4,14 +4,23 @@ Terminal UI application for browsing and managing HashiCorp Vault secrets.
 
 ## Features
 
-- Browse Vault KV secrets with an intuitive tree navigation
-- View and search secret keys and values
-- Copy secrets to clipboard
-- View and manage Vault policies
-- Filter and search functionality
-- Async operations with loading states
-- Real-time log monitoring
-- Support for Vault Enterprise namespaces
+- Browse the KV version 2 secrets engine mounted at `secret/`, folder by
+  folder; the secret under the cursor is shown next to the list
+- Values are masked until you reveal them, one at a time or all at once
+- Create, edit and delete secrets; values keep their JSON type (numbers,
+  booleans, lists) through an edit
+- Version history: view any version, or restore one as a new version
+- Fuzzy filter within the current folder
+- Copy a path or a value to the clipboard; what was copied is cleared again
+  after 30 seconds
+- Read ACL policies
+- A log of what this session did (which secret was read, written or
+  deleted), inside the app
+- Vault Enterprise namespaces
+
+Not supported: KV version 1, mounts other than `secret/`, authentication
+other than a token, and editing policies. Nothing is cached; every view is a
+fresh read from Vault, and each read appears in Vault's own audit log.
 
 ## Screenshots
 
@@ -41,44 +50,45 @@ Terminal UI application for browsing and managing HashiCorp Vault secrets.
 
 ## Architecture
 
-VltView follows a layered component-based architecture:
+Three layers, each talking only to the one below it:
 
 ```
 ┌─────────────────────────────────────────┐
-│            TUI Layer (UI)               │
-│  ┌────────────────────────────────────┐ │
-│  │  Root Component (Screen Manager)   │ │
-│  │  ├─ Browser Screen                 │ │
-│  │  ├─ Detail Screen                  │ │
-│  │  ├─ Policy Screen                  │ │
-│  │  └─ Help Overlay                   │ │
-│  └────────────────────────────────────┘ │
+│            TUI layer (src/tui)          │
+│  Root: screens, key routing, which      │
+│        results are still wanted         │
+│  ├─ Main screen: list + secret/editor   │
+│  ├─ Policy screen                       │
+│  ├─ Log screen                          │
+│  └─ Help overlay                        │
 └─────────────────────────────────────────┘
-              ↕ Actions
+              ↕ actions
 ┌─────────────────────────────────────────┐
-│        App Layer (Business Logic)       │
-│  ├─ NavigationController               │
-│  ├─ SecretService                      │
-│  ├─ PolicyService                      │
-│  └─ FilterEngine                       │
+│          App layer (src/app)            │
+│  ├─ NavigationController: list folders  │
+│  ├─ SecretService: read, write, delete  │
+│  ├─ PolicyService: list, read           │
+│  └─ FilterEngine: fuzzy filter          │
 └─────────────────────────────────────────┘
-              ↕ API Calls
+              ↕ async calls
 ┌─────────────────────────────────────────┐
-│      Vault Client (HTTP API)            │
-│  ├─ Auth (Token, AppRole, etc.)        │
-│  ├─ KV v1/v2 Operations                │
-│  └─ Policy Operations                  │
+│       Vault client (src/vault)          │
+│  ├─ Token authentication                │
+│  ├─ KV v2 on the mount secret/          │
+│  └─ ACL policies (read)                 │
 └─────────────────────────────────────────┘
 ```
 
 ### Key Modules
 
-- **`tui`**: Terminal UI layer using Ratatui, component-based architecture with action/event handling
-- **`app`**: Business logic layer with service-oriented design (navigation, secrets, policies)
-- **`vault`**: Vault API client with async HTTP operations (reqwest + tokio)
-- **`state`**: Shared application state management with Arc/RwLock
-- **`config`**: Configuration management (file, env vars, CLI args)
-- **`clipboard`**: Cross-platform clipboard integration
+- **`tui`**: Terminal UI with Ratatui: components that emit actions, and a
+  root that processes them and starts the requests
+- **`app`**: Services between the UI and the Vault client
+- **`vault`**: HTTP client for the Vault API (reqwest + tokio), with rate
+  limiting, path sanitization and the session log
+- **`state`**: The folder on screen and the history of folders visited
+- **`config`**: Configuration from file, environment and command line
+- **`clipboard`**: Clipboard access with auto-clear
 
 ## Installation
 
@@ -112,8 +122,9 @@ vltview
 # Or use CLI flags
 vltview --vault-addr http://localhost:8200 --vault-token your-token
 
-# Start at a specific path
-vltview secret/data/myapp
+# Start in a folder. Paths are relative to the KV mount `secret/`, which
+# vltview adds itself: this opens secret/myapp
+vltview /myapp
 
 # With config file
 vltview --config ~/.vltview.yaml
@@ -155,14 +166,16 @@ of them. The main ones:
 
 | Where | Key | Action |
 |-------|-----|--------|
-| Anywhere | `Tab`, `h`/`l` | Switch between the list and the secret |
+| Main screen | `Tab`, `h`/`l`, `←`/`→` | Switch between the list and the secret |
 | | `r` | Reload the current folder |
 | | `p` / `~` | Policies / application logs |
 | | `?` | Help |
-| | `q`, `Ctrl+C` | Quit |
-| List | `↑/↓` or `j/k`, `PgUp/PgDn`, `g/G` | Move; the secret under the cursor is shown |
+| | `q` | Quit (asks if an edit has unsaved changes) |
+| | `Ctrl+C` | Quit from anywhere, at once |
+| List | `↑/↓` or `j/k`, `PgUp/PgDn`, `g/G`, `Home/End` | Move; the secret under the cursor is shown |
 | | `Enter` | Open the folder, or go into the secret |
 | | `Backspace` | Parent folder |
+| | `b` / `f` | Back / forward through the folders visited |
 | | `/` | Filter the folder (`Esc` clears) |
 | | `n` / `d` | New secret / delete secret |
 | | `y` | Copy the path |
@@ -171,11 +184,16 @@ of them. The main ones:
 | | `c` | Copy the selected value |
 | | `e` | Edit |
 | | `l` | Version history |
+| | `Esc` | Back to the list |
+| Version history | `Enter` | Show the selected version |
+| | `n` | Edit a copy of it; saving makes it the current version |
 | Editor | `Enter` | Edit the value; in a field, done |
 | | `Alt+Enter`, `Ctrl+J` | Line break in a value |
+| | `Tab` | In a field: switch between key and value |
 | | `r` / `a` / `d` | Rename key / add field / delete field |
+| | `Space` / `v` | Reveal the selected value / every value |
 | | `Ctrl+S` | Save the secret |
-| | `Esc` | Discard the field being typed, or close the editor |
+| | `Esc` | Discard the field being typed, or close the editor (asks if there are unsaved changes) |
 
 Moving the cursor onto a secret reads it from Vault once the cursor rests
 there, so scrolling through a folder does not read every secret on the way.

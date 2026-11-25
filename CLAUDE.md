@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 VltView is a terminal UI (TUI) application for browsing and managing HashiCorp Vault secrets. Built with Ratatui for the UI framework and Tokio for async operations, it follows a clean three-layer architecture with component-based UI.
 
+What it works with: the KV version 2 secrets engine mounted at `secret/` (the mount is fixed in `vault/kv.rs`; KV v1 and other mounts are not supported), ACL policies (read only), and token authentication. Nothing is cached: every view is a fresh read from Vault.
+
 ## Build & Development Commands
 
 ### Toolchain
@@ -79,7 +81,8 @@ Component-based architecture using Ratatui. The Root component manages screens a
 - **Actions** (`action.rs`): All state changes flow through the `Action` enum. Components emit actions, Root processes them.
 - **Components** (`component.rs`): Trait-based system. Each component has `init()`, `handle_key()`, `update()`, `draw()`, and `captures_input()`.
 - **AsyncManager** (`async_manager.rs`): Spawns async operations on Tokio runtime, returns completed actions via channels.
-- **Root** (`root.rs`): Top-level component managing screen transitions, async completions, and global state.
+- **Root** (`root.rs`): Top-level component managing screen transitions, async completions, and global state. It decides which results are still wanted (the secret under the cursor, the latest folder listing).
+- **Key table** (`keymap.rs`): The hints for every context. Footers and the help overlay are generated from it, and a test presses every key in it.
 
 **Component hierarchy:**
 - `Root` (screen manager)
@@ -91,7 +94,7 @@ Component-based architecture using Ratatui. The Root component manages screens a
   - `LogScreen` (application logs)
   - `HelpOverlay` (modal help display)
 
-**Critical pattern:** Components never directly call async operations. They emit actions (e.g., `Action::ViewSecret`), Root spawns async tasks via AsyncManager, which returns completion actions (e.g., `Action::SecretLoaded`) that components handle in `update()`.
+**Critical pattern:** Components never directly call async operations. They emit actions (e.g., `Action::OpenSecret`), Root spawns async tasks via AsyncManager, which returns completion actions (e.g., `Action::SecretLoaded`, or `Action::SecretLoadFailed`) that components handle in `update()`.
 
 ### 2. App Layer (`src/app/`)
 
@@ -113,19 +116,20 @@ Business logic layer. Service-oriented design with Arc/RwLock for shared state.
 HTTP client for Vault API using reqwest + Tokio.
 
 **Modules:**
-- `kv.rs`: KV v1 and v2 secret engine operations (list, read, write, delete)
+- `kv.rs`: KV v2 operations on the mount `secret/` (list, read, read a version, write, delete with all versions, read metadata)
 - `policy.rs`: Policy API (list, read policies)
 - `auth.rs`: `Token` (wiped on drop, not `Clone`) and `AuthManager`, its one owner
-- `request.rs`: Request builders with authentication headers
-- `response.rs`: Response parsing and error handling
-- `sanitize.rs`: Path sanitization for Vault API
+- `request.rs`: What every request shares: `authorize` (token and namespace headers) and `ensure_success` (any other status becomes a sanitized error)
+- `response.rs`: Types of Vault's answers
+- `sanitize.rs`: Path and namespace sanitization, URL building (`vault_url`), error sanitization
+- `audit_log.rs`: One log entry per operation (action, path, count), never values
 
 **Security features:**
 - **Rate limiting**: Semaphore-based (MAX_CONCURRENT_REQUESTS = 10) applied to all KV and Policy API operations
 - **Path sanitization**: `sanitize_vault_path()` prevents path traversal attacks
 - **Namespace sanitization**: `sanitize_namespace()` prevents header injection (Enterprise)
 - **Error sanitization**: `sanitize_vault_error()` prevents information disclosure
-- **Audit logging**: All operations logged via `audit_log` module with redaction of sensitive data
+- **Audit logging**: Each operation is logged via the `audit_log` module with its action, the full path and a count, and shown on the log screen. This is the session's own log inside the app; it is not written to a file and it is not Vault's audit log
 - **Data redaction**: `redact_secret_data()` shows keys but hides values in logs
 
 ## Key Patterns
@@ -208,9 +212,11 @@ src/
 │   ├── mod.rs              # VaultClient
 │   ├── kv.rs               # KV engine API
 │   ├── policy.rs           # Policy API
-│   ├── auth.rs             # Authentication
-│   ├── request.rs          # Request builders
-│   └── response.rs         # Response parsing
+│   ├── auth.rs             # Token and its one owner
+│   ├── request.rs          # Headers and status check shared by all requests
+│   ├── response.rs         # Types of Vault's answers
+│   ├── sanitize.rs         # Path, namespace and error sanitization, URLs
+│   └── audit_log.rs        # What is logged about each operation
 ├── state/                  # Application state
 │   └── mod.rs              # AppState with RwLock
 ├── config/                 # Configuration
@@ -304,19 +310,21 @@ Environment variables:
 
 ### Viewport & Scrolling
 - Components manage their own scroll state
-- Adjust scroll in `draw()` before rendering to keep selection visible
-- Use `Block::borders()` height to calculate viewport size
-- Lists that can outgrow the pane are rendered with a `ListState` kept in the component
+- A list that can outgrow its pane must keep the cursor on screen, and has a render test that proves it. Lists of one-row items (navigation, fields, versions, editor, policies) are rendered with a `ListState` kept in the component, which does that
+- The log screen is the exception: an entry can wrap over several rows, so it lays its rows out itself and scrolls by row
+- Paging needs the height the list had when it was last drawn; components store it in `draw()`
 
 ### Layout
-- The main screen has one header line and one footer line; each pane is a single bordered block with its state on the border. Do not add nested boxes: at 80x24 every row counts
+- The main screen has one header line and one footer line; each pane is a single bordered block with its state on the border. Do not add nested boxes: at 80x24 every row counts. The one box inside a pane is the text box of the field being typed in the editor: it is there only while typing, and it has to stand out from the list above it
 - Popups have a fixed size (`popup::centered`), not a percentage of the screen, so their text is all on screen on a small terminal
 - Text that carries a warning or instructions is wrapped or dropped whole, never cut off mid-sentence. Check new UI at 80x24 (the render tests draw into a `TestBackend` of that size)
 
 ### KV Version Handling
-- Supports both KV v1 (unversioned) and KV v2 (versioned)
-- KV v2 paths have `/data/` injected by client (e.g., `secret/data/myapp`)
-- DetailView shows version selector for KV v2 secrets
+- Only KV v2 is supported, at the mount `secret/` (`KV_MOUNT` in `kv.rs`). KV v1 and configurable mounts are not implemented
+- Paths in the UI are relative to the mount: `/myapp` is `secret/myapp` in Vault. The client adds `data/` or `metadata/` (`secret/data/myapp`); a path that starts with `secret/` would be doubled
+- A new secret is written with check-and-set 0; an edit is an unconditional write of a new version
+- Delete removes the metadata, that is every version; there is no soft delete
+- DetailView shows the version history and can load any version
 
 ### Logging
 Uses `tracing` crate. Events are captured by `LogCaptureLayer` (`src/tui/log_buffer.rs`) with their message and their structured fields, and stored in the global `LogBuffer`. The log screen shows both, so a field is as visible as the message: the rule about tokens and secret values covers fields too.
@@ -427,14 +435,15 @@ let _permit = self.rate_limiter.acquire().await?;
 - **Error sanitization**: Redacts internal details from user-facing errors
 
 ### Audit Logging with Redaction
-All sensitive operations are logged WITHOUT exposing secrets:
+Every operation is logged with what was done to what, and never with a value:
 ```rust
-// Log secret write - shows key count, not values
+// secret.write path=/team/db fields=3
 audit_log::log_secret_write(&path, data.len());
 
-// Redact data before logging
-let redacted = audit_log::redact_secret_data(&data); // Shows keys: "***REDACTED***"
+// Field names only, for debug output
+let redacted = audit_log::redact_secret_data(&data); // every value is "***REDACTED***"
 ```
+"Authenticated" is logged by `AuthAudit::accepted()` after the first request Vault accepts, not when the client is built. A test (`no_entry_contains_a_secret_value_or_the_token`) reads the whole log after a write and a read; keep it passing.
 
 ### Clipboard Auto-Clear
 Clipboard manager automatically clears copied secrets after 30 seconds:
@@ -448,7 +457,7 @@ Clipboard manager automatically clears copied secrets after 30 seconds:
 - **Apply rate limiting** to new Vault API operations
 - **Sanitize all user input** going to Vault API
 - **Build request URLs with `sanitize::vault_url()`**, never `format!`. It percent-encodes each path segment, so a name containing `%2e%2e`, `?` or `#` cannot change which endpoint is called
-- **Check the HTTP status of every response** (`ensure_success` in `kv.rs`). A write that Vault rejects must reach the UI as an error
+- **Check the HTTP status of every response** (`ensure_success` in `request.rs`). A write that Vault rejects must reach the UI as an error
 - **Create with `WriteMode::Create`**, which writes with check-and-set 0: Vault refuses it if anything exists at the path. Checking the name against the folder on screen is a convenience, not the guard; it cannot see a nested name or a secret created by someone else since the folder was listed
 - **Keep secret values as `vault::SecretData`** (`HashMap<String, serde_json::Value>`), not strings. Converting to `String` anywhere on the load path deletes non-string fields on the next save. Use `app::secret::display_value()` to show a value and `edited_value()` to turn edited text back into a value
 - **Async completions must say what they are for** (path, version, policy name, request number), failures included, and be ignored when the user has moved on. See the `SecretLoaded` guard and `take_listing` in `Root`, `DetailViewComponent::version_arrived`, and `PolicyScreen::awaited`
