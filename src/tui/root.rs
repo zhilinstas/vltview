@@ -311,8 +311,8 @@ impl Root {
                 return Ok(());
             }
 
-            Action::SaveSecret { path, data } => {
-                self.spawn_save_secret(app, path.clone(), data.clone());
+            Action::SaveSecret { path, data, mode } => {
+                self.spawn_save_secret(app, path.clone(), data.clone(), *mode);
                 return Ok(());
             }
 
@@ -739,14 +739,20 @@ impl Root {
     }
 
     /// Spawn async operation to save a secret
-    fn spawn_save_secret(&mut self, app: &App, path: String, data: crate::vault::SecretData) {
+    fn spawn_save_secret(
+        &mut self,
+        app: &App,
+        path: String,
+        data: crate::vault::SecretData,
+        mode: crate::vault::WriteMode,
+    ) {
         let secret_service = app.secret_service().clone();
         let failed_path = path.clone();
 
         self.async_manager.spawn(
             async move {
                 // Save the secret
-                secret_service.save(&path, data).await?;
+                secret_service.save(&path, data, mode).await?;
 
                 Ok(Action::Batch {
                     actions: vec![

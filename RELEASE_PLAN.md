@@ -143,9 +143,10 @@ Open:
       or editor is open when it arrives
 - [x] After a save the saved secret is loaded and shown even if the cursor
       has left it
-- [ ] Creating `a/b` when `a/b` exists still writes a new version: the name
-      check only looks at the folder on screen (from code). A create should
-      be written with check-and-set 0 so Vault refuses it
+- [x] Creating `a/b` when `a/b` exists still writes a new version: the name
+      check only looks at the folder on screen (from code). Fixed: a create
+      is written with check-and-set 0, so Vault refuses it; tried against the
+      dev Vault with `myapp/api`, which stayed at version 1
 - [ ] Keys that work but are not in the key table: the help overlay's own
       keys, `q` on the connecting screen, Esc to dismiss an error, Home/End
       in the list, and PgUp/PgDn/g/G, `?` and `h` in the editor

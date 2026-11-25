@@ -2023,4 +2023,87 @@ mod tests {
             assert!(matches!(action, Some(Action::Quit)));
         });
     }
+
+    #[test]
+    fn a_new_secret_is_saved_as_a_create_and_a_taken_name_keeps_the_editor() {
+        // Regression: the name was only compared with the folder on screen,
+        // so a nested name such as `a/b`, or a secret someone else created
+        // meanwhile, was overwritten with a new version.
+        with_screen(|screen, ctx| {
+            ctx.app.state().reload_folder("/", vec!["a/".to_string()]);
+            screen.update(Action::ShowCreateSecretInput, ctx).unwrap();
+            for c in "a/b".chars() {
+                screen.handle_key(key(KeyCode::Char(c)), ctx).unwrap();
+            }
+            let create = screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            screen
+                .update(create.expect("the editor opens"), ctx)
+                .unwrap();
+
+            // One field, then Ctrl+S
+            for c in "user".chars() {
+                screen.handle_key(key(KeyCode::Char(c)), ctx).unwrap();
+            }
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            for c in "admin".chars() {
+                screen.handle_key(key(KeyCode::Char(c)), ctx).unwrap();
+            }
+            let save = screen
+                .handle_key(
+                    KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                    ctx,
+                )
+                .unwrap();
+            match save {
+                Some(Action::SaveSecret { path, mode, .. }) => {
+                    assert_eq!(path, "/a/b");
+                    assert_eq!(mode, crate::vault::WriteMode::Create);
+                }
+                other => panic!("expected a save, got {other:?}"),
+            }
+
+            // Vault refuses: /a/b exists
+            let refused = Action::SaveFailed {
+                path: "/a/b".to_string(),
+                message: "Could not save /a/b: a secret already exists at this path; \
+                          nothing was written"
+                    .to_string(),
+            };
+            screen.update(refused, ctx).unwrap();
+
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(screen_text.contains("already exists"), "{screen_text}");
+            assert!(screen_text.contains("nothing was written"), "{screen_text}");
+            assert!(screen_text.contains("user"), "{screen_text}");
+            let edit = screen.edit_view.as_ref().expect("the editor stays open");
+            assert_eq!(
+                edit.secret_data().unwrap(),
+                secret(json!({"user": "admin"}))
+            );
+        });
+    }
+
+    #[test]
+    fn an_edit_of_an_existing_secret_is_saved_as_an_update() {
+        with_screen(|screen, ctx| {
+            screen.update(loaded("/a", json!({"k": "v"})), ctx).unwrap();
+            screen.update(Action::EditSecret, ctx).unwrap();
+            let save = screen
+                .handle_key(
+                    KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                    ctx,
+                )
+                .unwrap();
+            assert!(
+                matches!(
+                    save,
+                    Some(Action::SaveSecret {
+                        mode: crate::vault::WriteMode::Update,
+                        ..
+                    })
+                ),
+                "{save:?}"
+            );
+        });
+    }
 }

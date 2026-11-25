@@ -424,6 +424,7 @@ Clipboard manager automatically clears copied secrets after 30 seconds:
 - **Sanitize all user input** going to Vault API
 - **Build request URLs with `sanitize::vault_url()`**, never `format!`. It percent-encodes each path segment, so a name containing `%2e%2e`, `?` or `#` cannot change which endpoint is called
 - **Check the HTTP status of every response** (`ensure_success` in `kv.rs`). A write that Vault rejects must reach the UI as an error
+- **Create with `WriteMode::Create`**, which writes with check-and-set 0: Vault refuses it if anything exists at the path. Checking the name against the folder on screen is a convenience, not the guard; it cannot see a nested name or a secret created by someone else since the folder was listed
 - **Keep secret values as `vault::SecretData`** (`HashMap<String, serde_json::Value>`), not strings. Converting to `String` anywhere on the load path deletes non-string fields on the next save. Use `app::secret::display_value()` to show a value and `edited_value()` to turn edited text back into a value
 - **Async completions must say what they are for** (path, version, policy name, request number), failures included, and be ignored when the user has moved on. See the `SecretLoaded` guard and `take_listing` in `Root`, `DetailViewComponent::version_arrived`, and `PolicyScreen::awaited`
 - **Pasted text is data**: it arrives as `Event::Paste` and goes through `Component::handle_paste`, which only text inputs act on. Never feed it to `handle_key`

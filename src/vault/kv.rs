@@ -16,6 +16,17 @@ use super::sanitize::{sanitize_vault_error, sanitize_vault_path, vault_url};
 /// preserve numbers, booleans, nulls and nested structures.
 pub type SecretData = HashMap<String, serde_json::Value>;
 
+/// What a write is allowed to replace
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteMode {
+    /// A new secret. Vault is asked to write only if nothing exists at the
+    /// path (check-and-set 0), so a create can never add a version to a
+    /// secret that is already there, wherever the name came from.
+    Create,
+    /// A new version of an existing secret
+    Update,
+}
+
 /// Mount point of the KV v2 engine
 const KV_MOUNT: &str = "secret";
 
@@ -118,8 +129,9 @@ impl KvEngine {
         Ok(vault_resp.data)
     }
 
-    /// Put (create/update) a secret
-    pub async fn put(&self, path: &str, data: SecretData) -> Result<()> {
+    /// Write a secret: a new one (`WriteMode::Create`, refused by Vault if
+    /// the path is taken) or a new version of an existing one
+    pub async fn put(&self, path: &str, data: SecretData, mode: WriteMode) -> Result<()> {
         // Acquire rate limit permit
         let _permit = self.rate_limiter.acquire().await?;
 
@@ -130,14 +142,26 @@ impl KvEngine {
         let redacted_data = audit_log::redact_secret_data(&data);
         tracing::debug!("Writing secret with keys: {:?}", redacted_data.keys());
 
-        let body = serde_json::json!({
-            "data": data
-        });
+        let body = match mode {
+            WriteMode::Create => serde_json::json!({ "options": { "cas": 0 }, "data": data }),
+            WriteMode::Update => serde_json::json!({ "data": data }),
+        };
 
         let response = self
             .authorize(self.client.post(url).json(&body))
             .send()
             .await?;
+
+        // Vault refuses a check-and-set write with 400 and this text. Say
+        // what it means; "Invalid request" would not tell the user that the
+        // name is taken.
+        if mode == WriteMode::Create && response.status() == StatusCode::BAD_REQUEST {
+            let error_text = response.text().await.unwrap_or_default();
+            if error_text.contains("check-and-set") {
+                anyhow::bail!("a secret already exists at this path; nothing was written");
+            }
+            anyhow::bail!("{}", sanitize_vault_error(400, &error_text));
+        }
 
         // A rejected write (403, 400, ...) must surface as an error: reporting
         // it as success makes the UI say "Saved" and drop the user's edits.
@@ -235,7 +259,7 @@ mod tests {
             .await;
 
         let result = engine(&server)
-            .put("/app/db", data(json!({"k": "v"})))
+            .put("/app/db", data(json!({"k": "v"})), WriteMode::Update)
             .await;
 
         mock.assert_async().await;
@@ -263,6 +287,7 @@ mod tests {
                 data(json!({
                     "host": "db", "port": 5432, "tls": true, "tags": ["a", "b"], "note": null
                 })),
+                WriteMode::Update,
             )
             .await
             .unwrap();
@@ -374,5 +399,90 @@ mod tests {
 
         escaped.assert_async().await;
         contained.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn create_asks_vault_to_write_only_if_nothing_is_there() {
+        // Regression: a create was an unconditional write, so creating a
+        // secret under a name that existed wrote a new version over it.
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/secret/data/app/new")
+            .match_body(Matcher::Json(json!({
+                "options": {"cas": 0},
+                "data": {"k": "v"}
+            })))
+            .with_status(200)
+            .with_body(r#"{"data":{"version":1}}"#)
+            .create_async()
+            .await;
+
+        engine(&server)
+            .put("/app/new", data(json!({"k": "v"})), WriteMode::Create)
+            .await
+            .unwrap();
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn create_over_an_existing_secret_is_refused_and_says_so() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/secret/data/app/db")
+            .with_status(400)
+            .with_body(
+                r#"{"errors":["check-and-set parameter did not match the current version"]}"#,
+            )
+            .create_async()
+            .await;
+
+        let result = engine(&server)
+            .put("/app/db", data(json!({"k": "v"})), WriteMode::Create)
+            .await;
+
+        mock.assert_async().await;
+        let err = result.expect_err("an existing secret must not be overwritten");
+        assert_eq!(
+            err.to_string(),
+            "a secret already exists at this path; nothing was written"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_rejected_create_is_not_mistaken_for_an_existing_secret() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/v1/secret/data/app/db")
+            .with_status(400)
+            .with_body(r#"{"errors":["no data provided"]}"#)
+            .create_async()
+            .await;
+
+        let err = engine(&server)
+            .put("/app/db", data(json!({"k": "v"})), WriteMode::Create)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Invalid request");
+    }
+
+    #[tokio::test]
+    async fn an_update_is_written_without_a_condition() {
+        // Saving an edit of an existing secret is not check-and-set
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/secret/data/app/db")
+            .match_body(Matcher::Json(json!({"data": {"k": "v2"}})))
+            .with_status(200)
+            .with_body(r#"{"data":{"version":2}}"#)
+            .create_async()
+            .await;
+
+        engine(&server)
+            .put("/app/db", data(json!({"k": "v2"})), WriteMode::Update)
+            .await
+            .unwrap();
+
+        mock.assert_async().await;
     }
 }

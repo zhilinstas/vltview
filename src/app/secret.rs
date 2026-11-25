@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::state::AppState;
-use crate::vault::{SecretData, VaultClient};
+use crate::vault::{SecretData, VaultClient, WriteMode};
 
 /// Text shown (and edited) for a secret value.
 ///
@@ -63,8 +63,9 @@ impl SecretService {
         Ok(secret.data)
     }
 
-    pub async fn save(&self, path: &str, data: SecretData) -> Result<()> {
-        self.vault.kv().put(path, data).await?;
+    /// Write a secret. A create is refused if the path is already taken.
+    pub async fn save(&self, path: &str, data: SecretData, mode: WriteMode) -> Result<()> {
+        self.vault.kv().put(path, data, mode).await?;
         self.state.invalidate_cache(path);
         Ok(())
     }

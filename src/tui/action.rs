@@ -1,4 +1,4 @@
-use crate::vault::SecretData;
+use crate::vault::{SecretData, WriteMode};
 
 /// All possible actions in the VltView application
 ///
@@ -163,7 +163,12 @@ pub enum Action {
     CreateSecret { name: String },
 
     /// Save current secret being edited
-    SaveSecret { path: String, data: SecretData },
+    SaveSecret {
+        path: String,
+        data: SecretData,
+        /// Whether this creates the secret or adds a version to it
+        mode: WriteMode,
+    },
 
     /// Secret saved successfully
     SecretSaved { path: String },

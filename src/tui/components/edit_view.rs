@@ -16,7 +16,7 @@ use crate::tui::components::popup::{
     border_color, centered, display_width, selection_style, truncate, wrap,
 };
 use crate::tui::context::{ComponentContext, RenderContext};
-use crate::vault::SecretData;
+use crate::vault::{SecretData, WriteMode};
 
 /// Widest the key column gets, in columns
 const MAX_KEY_WIDTH: usize = 32;
@@ -379,6 +379,12 @@ impl EditViewComponent {
             Ok(data) => Some(Action::SaveSecret {
                 path: self.path.clone(),
                 data,
+                // A new secret must not replace one that is already there
+                mode: if self.is_new {
+                    WriteMode::Create
+                } else {
+                    WriteMode::Update
+                },
             }),
             Err(message) => {
                 self.error = Some(message);
@@ -1120,9 +1126,10 @@ mod tests {
 
             let action = view.handle_key(ctrl('s'), ctx).unwrap();
             match action {
-                Some(Action::SaveSecret { path, data }) => {
+                Some(Action::SaveSecret { path, data, mode }) => {
                     assert_eq!(path, "/secret/test");
                     assert_eq!(data["host"], json!("db2"));
+                    assert_eq!(mode, WriteMode::Update);
                 }
                 other => panic!("expected a save, got {other:?}"),
             }
