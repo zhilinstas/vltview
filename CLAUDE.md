@@ -239,7 +239,7 @@ src/
 1. Handle the key in the component's `handle_key()`
 2. Add or change the entry in `src/tui/keymap.rs` for that context. Footers and the help overlay are generated from it, so a key that is not there is not shown anywhere
 3. Footer labels are short; hints that do not fit the terminal width are dropped by priority, never cut
-4. A second key for the same thing gets its own entry with footer priority 0 ("The same as c"), not a mention in another entry's help text: `every_hinted_key_does_something_where_it_is_hinted` in `root.rs` presses each key of each entry in the place it is hinted for, and can only press what the table spells out. A new context needs a way in there (`ways_into`)
+4. A second key for the same thing gets its own entry with footer priority 0 ("The same as c"), not a mention in another entry's help text: `every_hinted_key_does_what_its_help_says` in `root.rs` presses each key of each entry in the place it is hinted for, and can only press what the table spells out. It checks each key against `expected` in the same file (the action it asks for, where it leads, or that it changes what is shown); a new entry needs a line there, and a new context needs a way in (`ways_into`). The connecting screen runs before `Root` exists; its keys are decided by `gives_up_connecting` in `tui/mod.rs`
 5. Do not write a key hint as a string anywhere else, in a dialog either
 
 ### Adding a New Component

@@ -53,6 +53,13 @@ fn show_insecure_notice(root: &mut Root, app: &mut App) -> Result<()> {
     )
 }
 
+/// Whether a key pressed on the connecting screen gives up: `q` or Ctrl+C,
+/// the keys of `keymap::Context::Connecting`
+pub(crate) fn gives_up_connecting(key: KeyEvent) -> bool {
+    let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
+    ctrl_c || (key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE)
+}
+
 /// True while the terminal is in raw mode on the alternate screen
 static TERMINAL_TAKEN: AtomicBool = AtomicBool::new(false);
 
@@ -293,12 +300,10 @@ impl Tui {
                 }
                 _ = tokio::time::sleep(TICK) => {
                     while event::poll(Duration::ZERO)? {
-                        if let Event::Key(key) = event::read()? {
-                            let ctrl_c = key.code == KeyCode::Char('c')
-                                && key.modifiers == KeyModifiers::CONTROL;
-                            if ctrl_c || key.code == KeyCode::Char('q') {
-                                return Ok(false);
-                            }
+                        if let Event::Key(key) = event::read()?
+                            && gives_up_connecting(key)
+                        {
+                            return Ok(false);
                         }
                     }
                 }

@@ -988,8 +988,10 @@ mod tests {
         root.selection_changed(app, Some(path.to_string()), SelectionSource::Cursor, at);
     }
 
+    const SCREEN_WIDTH: usize = 120;
+
     fn screen_text(root: &mut Root, app: &App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(SCREEN_WIDTH as u16, 30)).unwrap();
         terminal.draw(|frame| root.render(frame, app)).unwrap();
         terminal
             .backend()
@@ -1898,8 +1900,11 @@ mod tests {
                 vec![then(app, root, &chars("d"))]
             }
             Context::CreatePrompt => {
-                let root = in_the_list(app);
-                vec![then(app, root, &chars("n"))]
+                let empty = in_the_list(app);
+                let empty = then(app, empty, &chars("n"));
+                let named = in_the_list(app);
+                let named = then(app, named, &chars("nx"));
+                vec![empty, named]
             }
             Context::DeleteConfirm => {
                 let root = in_the_list(app);
@@ -1964,14 +1969,194 @@ mod tests {
         }
     }
 
+    /// What a hinted key is expected to do, as its help text says
+    #[derive(Debug, Clone, Copy)]
+    enum Effect {
+        /// It asks `Root` for this action (the name of the variant)
+        Asks(&'static str),
+        /// It leads to where the keys of this context are hinted
+        To(Context),
+        /// It stays where it is and changes what is shown: moves, scrolls,
+        /// reveals, types
+        Changes,
+        /// Afterwards the screen shows this text, which it did not before
+        Shows(&'static str),
+        /// The app quits
+        Quits,
+    }
+
+    /// The expected effect of each key of each hint. This is the second,
+    /// independent description of the keys: a hint added to the table
+    /// without a line here fails the test.
+    fn expected(context: Context, hint: &str, key: KeyEvent) -> Effect {
+        use Context as C;
+        use Effect::*;
+        let moves = ["j/k ↑/↓", "PgUp/PgDn", "g/G Home/End", "PgUp/PgDn g/G"];
+        match (context, hint) {
+            (C::Global, "Tab") => To(C::Secret),
+            (C::Global, "h/l ←/→") => match key.code {
+                Code::Char('h') | Code::Left => To(C::Navigation),
+                _ => To(C::Secret),
+            },
+            (C::Global, "r") => Asks("Refresh"),
+            (C::Global, "p") => Asks("ShowPolicyScreen"),
+            (C::Global, "~") => Asks("ShowLogScreen"),
+            (C::Global, "?") => Asks("ShowHelp"),
+            (C::Global, "q" | "Ctrl+c") => Quits,
+
+            (C::Navigation, hint) if moves.contains(&hint) => Asks("SelectionChanged"),
+            (C::Navigation, "Enter") => Asks("OpenSecret"),
+            (C::Navigation, "Backspace") => Asks("NavigateUp"),
+            (C::Navigation, "b/f") => match key.code {
+                Code::Char('b') => Asks("HistoryBack"),
+                _ => Asks("HistoryForward"),
+            },
+            (C::Navigation, "/") => To(C::Filter),
+            (C::Navigation, "n") => To(C::CreatePrompt),
+            (C::Navigation, "d") => To(C::DeleteConfirm),
+            (C::Navigation, "y") => Asks("CopyToClipboard"),
+
+            (C::Filter, "type") => Changes,
+            (C::Filter, "Enter" | "Esc") => To(C::Navigation),
+            (C::Filtered, "/") => To(C::Filter),
+            (C::Filtered, "Esc") => To(C::Navigation),
+
+            (C::Secret, hint) if moves.contains(&hint) => Changes,
+            (C::Secret, "Enter") => To(C::ValueViewer),
+            (C::Secret, "Space" | "v") => Changes,
+            (C::Secret, "c" | "y") => Asks("CopyToClipboard"),
+            (C::Secret, "e") => Asks("EditSecret"),
+            (C::Secret, "l") => To(C::Versions),
+            (C::Secret, "Esc") => To(C::Navigation),
+
+            (C::Versions, hint) if moves.contains(&hint) => Changes,
+            (C::Versions, "Enter") => Asks("ViewSecretVersion"),
+            (C::Versions, "n") => Asks("CreateFromVersion"),
+            (C::Versions, "l/Esc") => To(C::Secret),
+
+            (C::ValueViewer, hint) if moves.contains(&hint) => Changes,
+            (C::ValueViewer, "c" | "y") => Asks("CopyToClipboard"),
+            (C::ValueViewer, "Esc" | "Enter/q") => To(C::Secret),
+
+            (C::Edit, hint) if moves.contains(&hint) => Changes,
+            (C::Edit, "Enter" | "e" | "r" | "a") => To(C::EditField),
+            (C::Edit, "d") => To(C::FieldDeleteConfirm),
+            (C::Edit, "Space" | "v") => Changes,
+            (C::Edit, "Ctrl+s") => Asks("SaveSecret"),
+            (C::Edit, "Esc") => Asks("CancelEdit"),
+            (C::Edit, "Tab" | "h ←") => To(C::Navigation),
+            (C::Edit, "?") => Asks("ShowHelp"),
+
+            (C::EditField, "Enter" | "Esc") => To(C::Edit),
+            (C::EditField, "Alt+Enter" | "Ctrl+j" | "Tab") => Changes,
+            (C::EditField, "Ctrl+s") => Asks("SaveSecret"),
+
+            (C::FieldDeleteConfirm, "y") => Shows("30 fields"),
+            (C::FieldDeleteConfirm, "n/Esc") => To(C::Edit),
+            (C::CreatePrompt, "Enter") => Asks("CreateSecret"),
+            (C::CreatePrompt, "Esc") => To(C::Navigation),
+            (C::DeleteConfirm, "y") => Asks("DeleteSecret"),
+            (C::DeleteConfirm, "n/Esc") => To(C::Navigation),
+            (C::DiscardConfirm, "y") => To(C::Secret),
+            (C::DiscardConfirm, "n/Esc") => To(C::Edit),
+            (C::QuitConfirm, "y") => Quits,
+            (C::QuitConfirm, "n/Esc") => To(C::Navigation),
+            (C::Notice, "Esc/Enter") => To(C::Navigation),
+            (C::LoadError, "Esc") => To(C::Navigation),
+
+            (C::Policies, hint) if moves.contains(&hint) => Changes,
+            (C::Policies, "Enter") => Asks("ViewPolicy"),
+            (C::Policies, "Esc") => Asks("ScreenBack"),
+            (C::Policies | C::PolicyContent, "?") => Asks("ToggleHelp"),
+            (C::Policies | C::PolicyContent, "q") => Quits,
+            (C::PolicyContent, hint) if moves.contains(&hint) => Asks("ScrollPolicy"),
+            (C::PolicyContent, "y") => Asks("CopyToClipboard"),
+            (C::PolicyContent, "Esc") => To(C::Policies),
+
+            (C::Logs, hint) if moves.contains(&hint) => Asks("ScrollLogs"),
+            (C::Logs, "a") => Asks("ToggleAutoScroll"),
+            (C::Logs, "c") => Asks("ClearLogs"),
+            (C::Logs, "Esc" | "~") => Asks("ScreenBack"),
+            (C::Logs, "q") => Quits,
+
+            (C::Help, hint) if moves.contains(&hint) => Changes,
+            (C::Help, "Space") => Changes,
+            (C::Help, "Esc/?/q") => Asks("HideHelp"),
+
+            (C::Connecting, "q" | "Ctrl+c") => Quits,
+
+            (context, hint) => panic!("no expected effect for {hint:?} in {context:?}"),
+        }
+    }
+
+    /// The footer line, where the keys that work are hinted
+    fn footer(root: &mut Root, app: &App) -> String {
+        let text: Vec<char> = screen_text(root, app).chars().collect();
+        text[text.len() - SCREEN_WIDTH..].iter().collect()
+    }
+
+    /// Whether the footer hints the keys of `context` (its first-priority
+    /// hints, which tell the contexts apart)
+    fn hints_of(footer: &str, context: Context) -> bool {
+        keymap::bindings(context)
+            .iter()
+            .filter(|binding| binding.footer == 1)
+            .all(|binding| footer.contains(&format!("{} {}", binding.keys, binding.label)))
+    }
+
+    /// The name of an action's variant
+    fn action_name(action: &Action) -> String {
+        let debug = format!("{action:?}");
+        debug
+            .split(['{', '(', ' '])
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Press `key` and say whether it had `effect`
+    fn key_does(root: &mut Root, app: &mut App, key: KeyEvent, effect: Effect) -> bool {
+        let footer_before = footer(root, app);
+        let text_before = screen_text(root, app);
+        let cells_before = screen_cells(root, app);
+
+        let action = root.handle_key_event(key, app).unwrap();
+        let asked = action.as_ref().map(action_name);
+        match action {
+            // The log buffer is shared by every test in the process
+            Some(Action::ClearLogs) | None => {}
+            Some(action) => root.process_action(action, app).unwrap(),
+        }
+
+        let footer_after = footer(root, app);
+        match effect {
+            Effect::Asks(name) => asked.as_deref() == Some(name),
+            Effect::To(context) => {
+                !root.should_quit()
+                    && footer_after != footer_before
+                    && hints_of(&footer_after, context)
+            }
+            Effect::Changes => {
+                !root.should_quit()
+                    && footer_after == footer_before
+                    && screen_cells(root, app) != cells_before
+            }
+            Effect::Shows(text) => {
+                !text_before.contains(text) && screen_text(root, app).contains(text)
+            }
+            Effect::Quits => root.should_quit(),
+        }
+    }
+
     #[tokio::test]
-    async fn every_hinted_key_does_something_where_it_is_hinted() {
+    async fn every_hinted_key_does_what_its_help_says() {
         // The key table and the key handling are two pieces of code. This
         // presses every key of every hint, in the place the hint is shown
-        // for, and fails for a key that does nothing there.
+        // for, and fails for a key that does not do what `expected` says.
         let mut app = app_with_a_long_list();
         let mut pressed = 0;
         for context in Context::ALL {
+            // Handled by the event loop before `Root` exists
             if context == Context::Connecting {
                 continue;
             }
@@ -1982,12 +2167,13 @@ mod tests {
 
             for binding in keymap::bindings(context) {
                 for key in keys_of(binding.keys) {
+                    let effect = expected(context, binding.keys, key);
                     let works = ways_into(context, &mut app)
                         .into_iter()
-                        .any(|mut root| key_has_an_effect(&mut root, &mut app, key));
+                        .any(|mut root| key_does(&mut root, &mut app, key, effect));
                     assert!(
                         works,
-                        "{context:?}: {:?} ({}) does nothing when {key:?} is pressed",
+                        "{context:?}: {:?} ({}): {key:?} did not have the effect {effect:?}",
                         binding.keys, binding.help
                     );
                     pressed += 1;
@@ -2000,6 +2186,23 @@ mod tests {
             "/app",
             "the app was not to change"
         );
+    }
+
+    #[test]
+    fn the_keys_hinted_on_the_connecting_screen_give_up() {
+        for binding in keymap::bindings(Context::Connecting) {
+            for key in keys_of(binding.keys) {
+                assert!(matches!(
+                    expected(Context::Connecting, binding.keys, key),
+                    Effect::Quits
+                ));
+                assert!(crate::tui::gives_up_connecting(key), "{key:?}");
+            }
+        }
+        // Other keys do not
+        for key in [plain(Code::Char('x')), plain(Code::Esc), plain(Code::Enter)] {
+            assert!(!crate::tui::gives_up_connecting(key), "{key:?}");
+        }
     }
 
     #[tokio::test]
@@ -2025,16 +2228,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_key_that_is_not_bound_is_caught_by_the_same_check() {
-        // The check must be able to fail: `x` does nothing in the list
+    async fn a_key_that_does_something_else_is_caught_by_the_same_check() {
+        // The check must be able to fail: `x` does nothing in the list, and
+        // `d` asks before deleting, it does not open the name prompt
         let mut app = app_with_a_long_list();
         let mut root = in_the_list(&mut app);
-        assert!(!key_has_an_effect(
+        assert!(!key_does(
             &mut root,
             &mut app,
-            plain(Code::Char('x'))
+            plain(Code::Char('x')),
+            Effect::Changes
         ));
-        assert!(key_has_an_effect(&mut root, &mut app, plain(Code::Down)));
+        let mut root = in_the_list(&mut app);
+        assert!(!key_does(
+            &mut root,
+            &mut app,
+            plain(Code::Char('d')),
+            Effect::To(Context::CreatePrompt)
+        ));
+        let mut root = in_the_list(&mut app);
+        assert!(key_does(
+            &mut root,
+            &mut app,
+            plain(Code::Char('d')),
+            Effect::To(Context::DeleteConfirm)
+        ));
     }
 
     #[tokio::test]

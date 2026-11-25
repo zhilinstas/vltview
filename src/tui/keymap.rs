@@ -299,7 +299,10 @@ const HELP: &[Binding] = &[
     bind("Esc/?/q", "close", "Close the help", 1),
 ];
 
-const CONNECTING: &[Binding] = &[bind("q", "quit", "Give up and quit (also Ctrl+c)", 1)];
+const CONNECTING: &[Binding] = &[
+    bind("q", "quit", "Give up and quit", 1),
+    bind("Ctrl+c", "quit", "The same as q", 0),
+];
 
 const POLICIES: &[Binding] = &[
     bind("j/k ↑/↓", "move", "Move between policies", 1),
