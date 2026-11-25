@@ -13,7 +13,7 @@ use crate::app::secret::{display_value, edited_value, json_type_name, masked};
 use crate::tui::action::Action;
 use crate::tui::component::Component;
 use crate::tui::components::popup::{
-    border_color, centered, display_width, selection_style, truncate, visibility, wrap, wrap_words,
+    border_color, centered, display_width, selection_style, truncate, visibility, wrap_words,
 };
 use crate::tui::context::{ComponentContext, RenderContext};
 use crate::vault::{SecretData, WriteMode};
@@ -103,9 +103,10 @@ pub struct EditViewComponent {
     /// Delete confirmation - stores the field name to be deleted
     delete_confirmation: Option<String>,
 
-    /// Shown above the fields when the edit starts from an old version, so
-    /// that saving it is not a rollback by accident
-    restore_note: Option<String>,
+    /// The old version the fields are a copy of, and the current version
+    /// that saving would replace. Said above the fields the whole time, so
+    /// that saving is not a rollback by accident.
+    restore_note: Option<(u64, u64)>,
 
     /// Scroll state of the field list
     list_state: ListState,
@@ -169,9 +170,7 @@ impl EditViewComponent {
     /// Say that the fields are a copy of an old version. Saving such an edit
     /// replaces the current version, so the view says so the whole time.
     pub fn with_restore_note(mut self, version: u64, current: u64) -> Self {
-        self.restore_note = Some(format!(
-            "Copy of v{version}: saving it replaces the current v{current}"
-        ));
+        self.restore_note = Some((version, current));
         // The fields already differ from what is in Vault
         self.has_changes = true;
         self
@@ -826,19 +825,32 @@ impl Component for EditViewComponent {
             }
         };
 
-        // Wrapped rather than cut, like the error: it is a warning
-        let note_lines = self
-            .restore_note
-            .as_deref()
-            .map(|note| wrap(note, inner.width.saturating_sub(2) as usize))
-            .unwrap_or_default();
-
         // The field list gives way to the error, down to one row
         let error_height =
             (error_lines.len() as u16).min(inner.height.saturating_sub(editor_height + 1));
 
+        // The note is a warning: it is wrapped at spaces and shown whole.
+        // Where even that does not fit, a shorter sentence takes its place;
+        // it is never cut.
+        let note_room = inner
+            .height
+            .saturating_sub(editor_height + error_height + 1) as usize;
+        let note_lines = self
+            .restore_note
+            .map(|(version, current)| {
+                [
+                    format!("Copy of v{version}: saving it replaces the current v{current}"),
+                    format!("Copy of v{version}"),
+                ]
+            })
+            .into_iter()
+            .flatten()
+            .map(|note| wrap_words(&note, inner.width.saturating_sub(2) as usize))
+            .find(|lines| lines.len() <= note_room)
+            .unwrap_or_default();
+
         let chunks = Layout::vertical([
-            Constraint::Length(note_lines.len().min(2) as u16),
+            Constraint::Length(note_lines.len() as u16),
             Constraint::Min(1),
             Constraint::Length(editor_height),
             Constraint::Length(error_height),
@@ -848,7 +860,6 @@ impl Component for EditViewComponent {
         if !note_lines.is_empty() {
             let lines: Vec<Line> = note_lines
                 .iter()
-                .take(2)
                 .map(|line| Line::from(format!(" {line}")))
                 .collect();
             let banner = Paragraph::new(lines).style(
@@ -924,6 +935,7 @@ fn crossterm_to_textarea_input(key: KeyEvent) -> Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::components::popup::assert_shown_whole;
     use crate::tui::context::FocusState;
     use ratatui::{Terminal, backend::TestBackend};
     use serde_json::json;
@@ -1399,19 +1411,6 @@ mod tests {
         view.handle_key(key(KeyCode::Enter), ctx).unwrap();
     }
 
-    /// The words of `message` appear on screen in order, none of them cut
-    fn assert_shown_whole(screen: &str, message: &str) {
-        let shown: Vec<&str> = screen
-            .split(|c: char| c.is_whitespace() || c == '│')
-            .filter(|word| !word.is_empty())
-            .collect();
-        let mut from = 0;
-        for word in message.split_whitespace() {
-            let found = shown[from..].iter().position(|shown| *shown == word);
-            from += found.unwrap_or_else(|| panic!("{word:?} is missing or cut\n{screen}")) + 1;
-        }
-    }
-
     #[test]
     fn a_value_without_a_key_is_refused_and_nothing_is_sent() {
         // Regression: Ctrl+S sent the field under the empty name, `{"": ...}`.
@@ -1588,5 +1587,28 @@ mod tests {
             assert!(!screen.contains("s3cret-value"), "{screen}");
             assert_eq!(value_cell(&screen, "token"), "••••••••", "{screen}");
         });
+    }
+
+    #[test]
+    fn a_long_restore_note_is_wrapped_and_shown_whole() {
+        // Regression: the note was cut at the column limit in the middle of
+        // a word, and anything past two lines was dropped.
+        let note = "Copy of v1234567: saving it replaces the current v1234568";
+        for (width, height) in [(52, 22), (30, 14), (22, 14)] {
+            let mut view = editor(json!({"host": "db"})).with_restore_note(1234567, 1234568);
+            let screen = rendered(&mut view, width, height);
+            assert_shown_whole(&screen, note);
+            assert!(screen.contains("host"), "{screen}");
+        }
+    }
+
+    #[test]
+    fn a_restore_note_that_cannot_fit_is_replaced_whole() {
+        // Too few rows for the sentence: a shorter one, not a cut one
+        let mut view = editor(json!({"host": "db"})).with_restore_note(1234567, 1234568);
+        let screen = rendered(&mut view, 20, 5);
+        assert!(!screen.contains("saving"), "{screen}");
+        assert_shown_whole(&screen, "Copy of v1234567");
+        assert!(screen.contains("host"), "{screen}");
     }
 }

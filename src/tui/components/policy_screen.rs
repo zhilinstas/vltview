@@ -183,7 +183,12 @@ impl PolicyScreen {
         }
 
         if let Some(error) = &self.error {
-            let error_widget = Paragraph::new(error.as_str())
+            // Wrapped at spaces: all of it is on screen
+            let lines: Vec<Line> = wrap_words(error, area.width.saturating_sub(4) as usize)
+                .into_iter()
+                .map(|line| Line::from(format!(" {line}")))
+                .collect();
+            let error_widget = Paragraph::new(lines)
                 .style(Style::default().fg(Color::Red))
                 .block(Block::default().borders(Borders::ALL).title("Error"));
             frame.render_widget(error_widget, area);
@@ -853,5 +858,39 @@ mod tests {
 
         screen.clear_content();
         assert!(!screen.is_viewing_content());
+    }
+
+    #[test]
+    fn a_long_error_about_the_policy_list_is_wrapped_and_shown_whole() {
+        // Regression: the error was one line, cut at the right border.
+        with_screen(&[], |screen, ctx| {
+            let message = "Could not load the policy list: Access denied - insufficient \
+                           permissions. The token needs the list capability on sys/policies/acl \
+                           to show the policies of this Vault.";
+            let failed = Action::PoliciesLoadFailed {
+                message: message.to_string(),
+            };
+            screen.update(failed, ctx).unwrap();
+
+            crate::tui::components::popup::assert_shown_whole(&text(screen, ctx), message);
+        });
+    }
+
+    #[test]
+    fn a_long_error_about_one_policy_is_wrapped_and_shown_whole() {
+        with_screen(&["admin"], |screen, ctx| {
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            let message = "Could not load policy 'admin': Access denied - insufficient \
+                           permissions. The token needs read on sys/policies/acl/admin.";
+            let failed = Action::PolicyLoadFailed {
+                name: "admin".to_string(),
+                message: message.to_string(),
+            };
+            screen.update(failed, ctx).unwrap();
+
+            let screen_text = text(screen, ctx);
+            crate::tui::components::popup::assert_shown_whole(&screen_text, message);
+            assert!(screen_text.contains("Policies (1)"), "{screen_text}");
+        });
     }
 }

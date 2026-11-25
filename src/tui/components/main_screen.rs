@@ -2,7 +2,7 @@ use crate::app::navigation::child_path;
 use crate::tui::action::{Action, FocusedPane};
 use crate::tui::component::Component;
 use crate::tui::components::popup::{
-    border_color, centered, spinner_frame, truncate, wrap, wrap_words,
+    border_color, centered, display_width, spinner_frame, truncate, wrap, wrap_words,
 };
 use crate::tui::components::{DetailViewComponent, EditViewComponent, NavigationPane};
 use crate::tui::context::{ComponentContext, RenderContext};
@@ -25,6 +25,29 @@ struct DeleteTarget {
     /// How many versions will be destroyed, when the secret is on screen and
     /// its history is known
     versions: Option<usize>,
+}
+
+/// Why a name typed into the new-secret prompt was refused
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NameError {
+    Empty,
+    /// The folder on screen already has this name
+    Taken(String),
+}
+
+impl NameError {
+    /// The message, from the most telling wording to the shortest. The
+    /// footer is one line, so it shows the first one that fits whole.
+    fn wordings(&self) -> Vec<String> {
+        match self {
+            NameError::Empty => vec!["a name is needed".to_string(), "name needed".to_string()],
+            NameError::Taken(name) => vec![
+                format!("'{name}' already exists"),
+                "that name already exists".to_string(),
+                "name taken".to_string(),
+            ],
+        }
+    }
 }
 
 /// What is waiting for the user to agree that unsaved changes may be lost
@@ -62,7 +85,7 @@ pub struct MainScreen {
     create_input: Option<TextArea<'static>>,
 
     /// Why the typed name was refused
-    create_error: Option<String>,
+    create_error: Option<NameError>,
 
     /// Status message (temporary)
     status_message: Option<String>,
@@ -221,14 +244,14 @@ impl MainScreen {
             (KeyCode::Enter, _) => {
                 let name = input.lines().join("").trim().trim_matches('/').to_string();
                 if name.is_empty() {
-                    self.create_error = Some("a name is needed".to_string());
+                    self.create_error = Some(NameError::Empty);
                     return Ok(None);
                 }
 
                 // An existing name is not a new secret: saving the empty
                 // editor over it would replace its current version
                 if ctx.app.state().list_items().contains(&name) {
-                    self.create_error = Some(format!("'{name}' already exists"));
+                    self.create_error = Some(NameError::Taken(name));
                     return Ok(None);
                 }
 
@@ -335,14 +358,23 @@ impl MainScreen {
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         if let Some(input) = &self.create_input {
             let label = " New secret name: ";
+            // The name keeps at least 8 columns. What is said next to it
+            // has to fit in the rest whole, or it is left out: an error cut
+            // in the middle says nothing.
+            let room = area.width.saturating_sub(label.len() as u16 + 8) as usize;
             let hint = match &self.create_error {
-                Some(error) => Span::styled(format!(" {error} "), Style::default().fg(Color::Red)),
-                None => Span::styled(
-                    " Enter create  Esc cancel ",
-                    Style::default().fg(Color::Gray),
-                ),
-            };
-            let hint_width = (hint.width() as u16).min(area.width * 2 / 3);
+                Some(error) => error
+                    .wordings()
+                    .into_iter()
+                    .map(|wording| format!(" {wording} "))
+                    .find(|wording| display_width(wording) <= room)
+                    .map(|wording| Span::styled(wording, Style::default().fg(Color::Red))),
+                None => Some(" Enter create  Esc cancel ")
+                    .filter(|hint| hint.len() <= room)
+                    .map(|hint| Span::styled(hint, Style::default().fg(Color::Gray))),
+            }
+            .unwrap_or_default();
+            let hint_width = hint.width() as u16;
             let chunks = Layout::horizontal([
                 Constraint::Length(label.len() as u16),
                 Constraint::Min(8),
@@ -2169,15 +2201,7 @@ mod tests {
 
             // Every word of it is there at 80x24, in order
             let screen_text = text(screen, ctx, 80, 24);
-            let shown: Vec<&str> = screen_text
-                .split(|c: char| c.is_whitespace() || c == '│')
-                .filter(|word| !word.is_empty())
-                .collect();
-            let mut from = 0;
-            for word in message.split_whitespace() {
-                let found = shown[from..].iter().position(|shown| *shown == word);
-                from += found.unwrap_or_else(|| panic!("{word:?} is cut\n{screen_text}")) + 1;
-            }
+            crate::tui::components::popup::assert_shown_whole(&screen_text, message);
             assert!(screen_text.contains("Esc close"), "{screen_text}");
 
             // Nothing else happens until it is closed: `q` does not quit
@@ -2420,6 +2444,54 @@ mod tests {
                 "{footer}"
             );
             assert_eq!(edited(screen), secret(json!({"host": "db2"})));
+        });
+    }
+
+    #[test]
+    fn the_name_prompts_error_is_never_cut() {
+        // Regression: the error quoted the name and was cut at two thirds
+        // of the footer, so a long name pushed "already exists" off screen.
+        let name = "payments-gateway-production-credentials-eu";
+        let type_name = |screen: &mut MainScreen, ctx: &mut ComponentContext| {
+            ctx.app.state().reload_folder("/", vec![name.to_string()]);
+            screen.update(Action::ShowCreateSecretInput, ctx).unwrap();
+            for c in name.chars() {
+                screen.handle_key(key(KeyCode::Char(c)), ctx).unwrap();
+            }
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            assert!(screen.create_input.is_some(), "the name is refused");
+        };
+
+        with_screen(|screen, ctx| {
+            type_name(screen, ctx);
+            let footer = rows(screen, ctx, 80, 24).pop().unwrap();
+            assert!(
+                footer.trim_end().ends_with("that name already exists"),
+                "{footer}"
+            );
+        });
+
+        // Less room: a shorter text, whole
+        with_screen(|screen, ctx| {
+            type_name(screen, ctx);
+            let footer = rows(screen, ctx, 44, 24).pop().unwrap();
+            assert!(footer.trim_end().ends_with("name taken"), "{footer}");
+        });
+
+        // No room at all: nothing rather than a piece of it
+        with_screen(|screen, ctx| {
+            type_name(screen, ctx);
+            let footer = rows(screen, ctx, 30, 24).pop().unwrap();
+            assert!(!footer.contains("taken"), "{footer}");
+            assert!(!footer.contains("exist"), "{footer}");
+        });
+
+        // An empty name
+        with_screen(|screen, ctx| {
+            screen.update(Action::ShowCreateSecretInput, ctx).unwrap();
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            let footer = rows(screen, ctx, 80, 24).pop().unwrap();
+            assert!(footer.trim_end().ends_with("a name is needed"), "{footer}");
         });
     }
 }

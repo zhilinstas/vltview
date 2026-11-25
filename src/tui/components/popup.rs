@@ -161,6 +161,21 @@ pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Test helper: the words of `message` are on `screen` in order, none of
+/// them cut. Borders and line breaks may come between them.
+#[cfg(test)]
+pub fn assert_shown_whole(screen: &str, message: &str) {
+    let shown: Vec<&str> = screen
+        .split(|c: char| c.is_whitespace() || c == '│')
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut from = 0;
+    for word in message.split_whitespace() {
+        let found = shown[from..].iter().position(|shown| *shown == word);
+        from += found.unwrap_or_else(|| panic!("{word:?} is missing or cut\n{screen}")) + 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

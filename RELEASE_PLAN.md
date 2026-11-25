@@ -155,8 +155,10 @@ Open:
 - [ ] Keys that work but are not in the key table: the help overlay's own
       keys, `q` on the connecting screen, Esc to dismiss an error, Home/End
       in the list, and PgUp/PgDn/g/G, `?` and `h` in the editor
-- [ ] Warnings can still be cut: the restore note beyond two lines, the name
-      prompt's error, and policy errors, which are not wrapped at all
+- [x] Warnings can still be cut: the restore note beyond two lines, the name
+      prompt's error, and policy errors, which are not wrapped at all.
+      Fixed: each is wrapped at spaces and shown whole, or replaced by a
+      shorter wording where there is no room
 - [ ] CLAUDE.md asks for `ListState` and for no nested boxes; the navigation
       pane and the log screen scroll by hand and the editor draws a box
       inside the pane. Follow the rule or say what it really requires
