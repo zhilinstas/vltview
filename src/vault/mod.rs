@@ -58,10 +58,6 @@ impl VaultClient {
 
         // Handle TLS verification
         if config.insecure {
-            eprintln!("\n⚠️  WARNING: TLS CERTIFICATE VERIFICATION DISABLED ⚠️");
-            eprintln!("⚠️  This is INSECURE and should ONLY be used for development!");
-            eprintln!("⚠️  Your Vault credentials may be intercepted by attackers!");
-            eprintln!("⚠️  NEVER use --insecure in production environments!\n");
             tracing::warn!("TLS certificate verification disabled - INSECURE MODE");
             client_builder = client_builder.danger_accept_invalid_certs(true);
         }

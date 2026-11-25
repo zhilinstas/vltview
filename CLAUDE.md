@@ -290,6 +290,12 @@ Environment variables:
 - An error is shown where its subject is: a failed load in the content pane while that secret is selected, a failed save inside the editor it came from, a policy error on the policy screen. Anything else (a folder that would not open, a failed delete or copy) is a message over the main screen (`MainScreen::notices`). A failed read of something the user has left is dropped
 - Components display errors in UI, don't panic
 
+### Terminal Lifecycle
+- `Tui::new` takes the terminal last (`take_terminal`), after everything that can fail. An error before that, or from `Tui::run`, is printed by `main` on a normal terminal
+- `restore_terminal` gives it back, once: when the `Tui` is dropped and from the panic hook. A panic on the UI thread restores the terminal and then prints its message and location; a panic in a background task is written to the application log and the UI goes on
+- Nothing printed to stderr is visible while the UI has the screen. Startup warnings are printed in `main` before the terminal is taken, which leaves them on the terminal after exit; one that matters during the session is also shown in the UI (`show_insecure_notice`)
+- The "token on the command line" warning is decided by `token_on_command_line` from where clap got the value. `cli.vault_token` is also set from `VAULT_TOKEN`
+
 ### Focus Management
 - `FocusState` tracks current focus (global, screen-level, pane-level)
 - Components check `RenderContext::is_focused` for styling

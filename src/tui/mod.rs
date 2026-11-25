@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::{
+    cursor::Show,
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
     },
@@ -14,6 +15,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::app::App;
@@ -35,6 +37,90 @@ use root::Root;
 /// How often the event loop wakes up when there is no input
 const TICK: Duration = Duration::from_millis(50);
 
+/// Shown in the footer when the UI opens with TLS verification off, until
+/// the first key. The warning printed before the UI took the screen is out
+/// of sight by then
+const INSECURE_NOTICE: &str =
+    "WARNING: TLS certificate verification is off, the connection is not secure";
+
+/// Say inside the UI that TLS verification is off
+fn show_insecure_notice(root: &mut Root, app: &mut App) -> Result<()> {
+    root.process_action(
+        action::Action::SetStatus {
+            message: INSECURE_NOTICE.to_string(),
+        },
+        app,
+    )
+}
+
+/// True while the terminal is in raw mode on the alternate screen
+static TERMINAL_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// Put the terminal into raw mode on the alternate screen.
+///
+/// From here on it is given back by `restore_terminal`: when the `Tui` is
+/// dropped, which covers every error, and by the panic hook.
+fn take_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    install_panic_hook();
+    TERMINAL_TAKEN.store(true, Ordering::SeqCst);
+
+    let taken = enable_raw_mode()
+        // Bracketed paste: the terminal marks pasted text as such, so it
+        // arrives as one `Event::Paste` instead of as typed keys
+        .and_then(|()| execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste))
+        .and_then(|()| Terminal::new(CrosstermBackend::new(io::stdout())));
+
+    if taken.is_err() {
+        restore_terminal();
+    }
+    Ok(taken?)
+}
+
+/// Give the terminal back: main screen, cooked mode, cursor visible.
+///
+/// Does nothing the second time. Leaving the alternate screen twice would
+/// move the cursor back to where it was before the UI started, on top of
+/// whatever has been printed since (a panic message).
+fn restore_terminal() {
+    if !TERMINAL_TAKEN.swap(false, Ordering::SeqCst) {
+        return;
+    }
+
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        Show
+    );
+}
+
+/// Report a panic where it can be read.
+///
+/// A panic on the thread that runs the UI ends the program: the terminal is
+/// given back first, then the message and its location are printed as usual.
+/// A panic in a background task ends only that task, so the UI keeps the
+/// terminal and the message goes to the application log.
+fn install_panic_hook() {
+    let ui_thread = std::thread::current().id();
+    let print = std::panic::take_hook();
+
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() == ui_thread {
+            restore_terminal();
+            print(info);
+        } else {
+            // On one line: the default report has the message on a second
+            let location = info.location().map(|at| at.to_string());
+            tracing::error!(
+                "Background task panicked at {}: {}",
+                location.as_deref().unwrap_or("unknown location"),
+                info.payload_as_str().unwrap_or("no message"),
+            );
+        }
+    }));
+}
+
 /// Main TUI application struct (new component-based architecture)
 pub struct Tui {
     /// Terminal instance
@@ -48,19 +134,18 @@ pub struct Tui {
 
     /// Root component managing all screens
     root: Root,
+
+    /// TLS certificate verification is off
+    insecure: bool,
 }
 
 impl Tui {
     /// Create a new TUI instance
+    ///
+    /// The terminal is taken last. Whatever fails before that is reported on
+    /// a terminal nobody has touched.
     pub fn new(config: Config, initial_path: String) -> Result<Self> {
-        // Setup terminal
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        // Bracketed paste: the terminal marks pasted text as such, so it
-        // arrives as one `Event::Paste` instead of as typed keys
-        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
-        let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
+        let insecure = config.insecure;
 
         // Create App layer
         let app = App::new(config, initial_path)?;
@@ -72,11 +157,14 @@ impl Tui {
         let runtime = tokio::runtime::Handle::current();
         let root = Root::new(runtime);
 
+        let terminal = take_terminal()?;
+
         Ok(Self {
             terminal,
             app,
             clipboard,
             root,
+            insecure,
         })
     }
 
@@ -91,6 +179,10 @@ impl Tui {
 
         // Initialize root component
         self.root.init(&self.app)?;
+
+        if self.insecure {
+            show_insecure_notice(&mut self.root, &mut self.app)?;
+        }
 
         // Main event loop
         while !self.root.should_quit() {
@@ -264,15 +356,40 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
-        // Restore terminal on exit
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            DisableBracketedPaste,
-            LeaveAlternateScreen
-        );
-        let _ = self.terminal.show_cursor();
+        // Restore terminal on exit, whether it is a quit or an error
+        restore_terminal();
 
         tracing::debug!("Terminal restored");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    #[tokio::test]
+    async fn insecure_notice_is_whole_in_the_footer_at_80x24() {
+        // The warning printed at startup is hidden behind the UI, so the UI
+        // has to carry one of its own
+        let config = Config {
+            vault_addr: "http://127.0.0.1:1".to_string(),
+            insecure: true,
+            ..Config::default()
+        };
+        let mut app = App::new(config, "/".to_string()).unwrap();
+        let mut root = Root::new(tokio::runtime::Handle::current());
+        root.init(&app).unwrap();
+
+        show_insecure_notice(&mut root, &mut app).unwrap();
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| root.render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let footer: String = (0..80).map(|x| buffer[(x, 23)].symbol()).collect();
+        assert_eq!(
+            footer.trim(),
+            "WARNING: TLS certificate verification is off, the connection is not secure"
+        );
     }
 }
