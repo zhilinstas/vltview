@@ -21,8 +21,10 @@ commits in one pull request.
 - [x] Commit separately from the fixes below. Decided: one pull request with
       one commit per step (modernization, blockers, UX) instead of one pull
       request per step. Each commit passes `mise run ci` on its own
-- [ ] Confirm CI is green on GitHub for Ubuntu and macOS (first real run of
-      the mise-based workflows; macOS builds are unverified)
+- [x] CI is green on GitHub for Ubuntu and macOS: the first run of the
+      mise-based workflows passed test, build and audit on pull request #1
+      with no changes needed. The release workflow (musl and the macOS
+      targets) is still unverified; see step 6
 
 Things to know about the upgrade:
 
