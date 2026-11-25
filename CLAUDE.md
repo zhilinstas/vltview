@@ -378,24 +378,31 @@ Key points:
 
 ## Release Process
 
-GitHub Actions automatically build multi-platform binaries on git tags:
+Pushing a tag that starts with `v` runs `.github/workflows/release.yml`:
 
 ```bash
 # Create and push a version tag
 git tag v0.1.0
 git push origin v0.1.0
-
-# GitHub Actions will:
-# 1. Build for Linux (glibc and musl), macOS (Intel and ARM)
-# 2. Create GitHub release
-# 3. Upload tarballs with SHA256 checksums
 ```
 
-Binaries produced:
+1. Four `build` jobs (Linux glibc and musl, macOS Intel and ARM) each build a tarball and its SHA256 checksum and hand them on as a workflow artifact. They have a read-only token.
+2. When all four have succeeded, the `release` job checks the eight files against their checksums, then creates the GitHub release and uploads them with `gh release create`. It is the only job with `contents: write`. If a build fails, no release is created.
+
+A tag with a hyphen (`v0.3.0-rc.1`) becomes a pre-release, so it is never shown as the latest release. Release notes are the ones GitHub generates; edit them on the release page.
+
+Files on the release, each with a `.sha256` next to it (check with `sha256sum -c <file>.sha256`):
 - `vltview-linux-amd64.tar.gz` (glibc)
 - `vltview-linux-amd64-musl.tar.gz` (static)
 - `vltview-macos-amd64.tar.gz` (Intel)
 - `vltview-macos-arm64.tar.gz` (Apple Silicon)
+
+### Workflow Rules
+
+- Every action in `.github/workflows/` is pinned to a full commit SHA with the version in a trailing comment (`uses: actions/checkout@<sha> # v7.0.1`). Look the SHA up, do not type it from memory: `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`; if that returns an annotated tag (`"type": "tag"`), follow it with `gh api repos/<owner>/<repo>/git/tags/<sha>`
+- Workflows start from `permissions: contents: read`; a job that needs more says so itself
+- Do not use `actions/create-release` or `actions/upload-release-asset` (both archived); use the `gh` CLI with `GH_TOKEN: ${{ github.token }}`
+- Check workflow changes with `mise x actionlint@latest shellcheck@latest -- actionlint`
 
 ## Security Features
 
