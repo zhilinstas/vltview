@@ -15,6 +15,7 @@ pub struct PolicyApi {
     auth: Arc<AuthManager>,
     namespace: Option<String>,
     rate_limiter: Arc<Semaphore>,
+    auth_audit: audit_log::AuthAudit,
 }
 
 impl PolicyApi {
@@ -25,6 +26,7 @@ impl PolicyApi {
         auth: Arc<AuthManager>,
         namespace: Option<String>,
         rate_limiter: Arc<Semaphore>,
+        auth_audit: audit_log::AuthAudit,
     ) -> Self {
         Self {
             client,
@@ -32,6 +34,7 @@ impl PolicyApi {
             auth,
             namespace,
             rate_limiter,
+            auth_audit,
         }
     }
 
@@ -56,6 +59,7 @@ impl PolicyApi {
 
         if response.status().is_success() {
             let data: serde_json::Value = response.json().await?;
+            self.auth_audit.accepted();
 
             // Extract policies list from response (LIST endpoints return "keys")
             if let Some(policies) = data
@@ -102,6 +106,7 @@ impl PolicyApi {
 
         if response.status().is_success() {
             let data: serde_json::Value = response.json().await?;
+            self.auth_audit.accepted();
 
             // Extract policy content from response
             if let Some(policy) = data
@@ -134,10 +139,11 @@ mod tests {
     fn api(base_url: String) -> PolicyApi {
         PolicyApi::new(
             Client::new(),
-            base_url,
+            base_url.clone(),
             Arc::new(AuthManager::new("test-token".to_string().into())),
             None,
             Arc::new(Semaphore::new(4)),
+            audit_log::AuthAudit::new(&base_url),
         )
     }
 

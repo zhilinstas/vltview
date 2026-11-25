@@ -3,7 +3,7 @@ use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use std::path::PathBuf;
 use tracing::Level;
-use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod app;
 mod clipboard;
@@ -119,55 +119,14 @@ fn init_logging(debug: bool) -> Result<()> {
 
     // Create the main subscriber with our custom log capture layer
     let subscriber = tracing_subscriber::registry()
-        .with(LogCaptureLayer)
+        .with(tui::log_buffer::LogCaptureLayer::new(
+            tui::log_buffer::LogBuffer::global(),
+        ))
         .with(tracing_subscriber::filter::LevelFilter::from_level(level));
 
     subscriber.init();
 
     Ok(())
-}
-
-/// Custom tracing layer that captures logs for the UI
-struct LogCaptureLayer;
-
-impl<S> Layer<S> for LogCaptureLayer
-where
-    S: tracing::Subscriber,
-{
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let metadata = event.metadata();
-        let level = metadata.level().to_string();
-        let target = metadata.target().to_string();
-
-        // Extract the message from the event
-        let mut visitor = MessageVisitor::default();
-        event.record(&mut visitor);
-
-        // Add to log buffer
-        tui::log_buffer::add_log(&level, &target, visitor.message);
-    }
-}
-
-/// Visitor to extract message from tracing event
-#[derive(Default)]
-struct MessageVisitor {
-    message: String,
-}
-
-impl tracing::field::Visit for MessageVisitor {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.message = format!("{:?}", value);
-            // Remove surrounding quotes if present
-            if self.message.starts_with('"') && self.message.ends_with('"') {
-                self.message = self.message[1..self.message.len() - 1].to_string();
-            }
-        }
-    }
 }
 
 #[cfg(test)]

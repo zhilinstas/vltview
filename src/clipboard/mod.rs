@@ -124,10 +124,6 @@ impl ClipboardManager {
             tokio::time::sleep(Duration::from_secs(timeout_secs)).await;
 
             if lock(&inner).clear_pending(Some(id)) {
-                tracing::info!(
-                    "Clipboard automatically cleared after {} seconds (security feature)",
-                    timeout_secs
-                );
                 audit_log::log_security_event(
                     "clipboard.auto_cleared",
                     &format!("Clipboard cleared after {}s timeout", timeout_secs),
@@ -265,5 +261,35 @@ mod tests {
 
         advance(10).await;
         assert_eq!(fake.content(), "");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_log_keeps_size_and_timeout_but_not_the_text() {
+        let (buffer, _guard) = crate::tui::log_buffer::capture();
+        let (mut clipboard, _fake) = manager();
+
+        clipboard.copy_text("copied-value-41d9").unwrap();
+        advance(31).await;
+
+        let entries = buffer.entries();
+        let entry = |action: &str| {
+            entries
+                .iter()
+                .find(|e| e.field("action") == Some(action))
+                .unwrap_or_else(|| panic!("no {action} entry in {entries:#?}"))
+        };
+
+        let copied = entry("clipboard.copy");
+        assert_eq!(copied.field("bytes"), Some("17"));
+        assert_eq!(copied.field("timeout_secs"), Some("30"));
+
+        let cleared = entry("clipboard.auto_cleared");
+        assert_eq!(cleared.level, "WARN");
+        assert!(cleared.message.contains("30s"), "{cleared:?}");
+
+        for entry in &entries {
+            let text = format!("{entry:?}");
+            assert!(!text.contains("copied-value-41d9"), "{text}");
+        }
     }
 }

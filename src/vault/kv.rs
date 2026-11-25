@@ -38,6 +38,7 @@ pub struct KvEngine {
     auth: Arc<AuthManager>,
     namespace: Option<String>,
     rate_limiter: Arc<Semaphore>,
+    auth_audit: audit_log::AuthAudit,
 }
 
 impl KvEngine {
@@ -48,6 +49,7 @@ impl KvEngine {
         auth: Arc<AuthManager>,
         namespace: Option<String>,
         rate_limiter: Arc<Semaphore>,
+        auth_audit: audit_log::AuthAudit,
     ) -> Self {
         Self {
             client,
@@ -55,6 +57,7 @@ impl KvEngine {
             auth,
             namespace,
             rate_limiter,
+            auth_audit,
         }
     }
 
@@ -95,6 +98,7 @@ impl KvEngine {
 
         let response = ensure_success(response).await?;
         let vault_resp: VaultResponse<ListResponse> = response.json().await?;
+        self.auth_audit.accepted();
         let count = vault_resp.data.keys.len();
         audit_log::log_secret_list(&sanitized_path, count);
         Ok(vault_resp.data.keys)
@@ -125,6 +129,7 @@ impl KvEngine {
 
         let vault_resp: VaultResponse<VaultSecret> = response.json().await?;
 
+        self.auth_audit.accepted();
         audit_log::log_secret_read(&sanitized_path);
         Ok(vault_resp.data)
     }
@@ -167,6 +172,7 @@ impl KvEngine {
         // it as success makes the UI say "Saved" and drop the user's edits.
         ensure_success(response).await?;
 
+        self.auth_audit.accepted();
         audit_log::log_secret_write(&sanitized_path, data.len());
         Ok(())
     }
@@ -188,6 +194,7 @@ impl KvEngine {
         let response = self.authorize(self.client.delete(url)).send().await?;
         ensure_success(response).await?;
 
+        self.auth_audit.accepted();
         audit_log::log_secret_delete(&sanitized_path);
         Ok(())
     }
@@ -209,6 +216,7 @@ impl KvEngine {
 
         let vault_resp: VaultResponse<FullSecretMetadata> = response.json().await?;
 
+        self.auth_audit.accepted();
         Ok(vault_resp.data)
     }
 }
@@ -241,6 +249,7 @@ mod tests {
             Arc::new(AuthManager::new("test-token".to_string().into())),
             None,
             Arc::new(Semaphore::new(4)),
+            audit_log::AuthAudit::new(&server.url()),
         )
     }
 

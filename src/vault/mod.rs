@@ -79,6 +79,9 @@ impl VaultClient {
         // Create rate limiter to prevent API flooding
         let rate_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
 
+        // "Authenticated" is logged when the first request succeeds, not here
+        let auth_audit = audit_log::AuthAudit::new(&base_url);
+
         // Initialize KV engine with rate limiter
         let kv = KvEngine::new(
             client.clone(),
@@ -86,6 +89,7 @@ impl VaultClient {
             Arc::clone(&auth),
             namespace.clone(),
             Arc::clone(&rate_limiter),
+            auth_audit.clone(),
         );
 
         // Initialize policy API with rate limiter
@@ -95,15 +99,13 @@ impl VaultClient {
             Arc::clone(&auth),
             namespace.clone(),
             Arc::clone(&rate_limiter),
+            auth_audit,
         );
 
         tracing::debug!(
             "Vault client initialized with max {} concurrent requests",
             MAX_CONCURRENT_REQUESTS
         );
-
-        // Log successful authentication (without exposing tokens)
-        audit_log::log_auth_success(&config.vault_addr);
 
         Ok(Self {
             client,

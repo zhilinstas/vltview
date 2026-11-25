@@ -319,13 +319,17 @@ Environment variables:
 - DetailView shows version selector for KV v2 secrets
 
 ### Logging
-Uses `tracing` crate. Logs are captured by `LogCaptureLayer` in `main.rs` and stored in global buffer for UI display.
+Uses `tracing` crate. Events are captured by `LogCaptureLayer` (`src/tui/log_buffer.rs`) with their message and their structured fields, and stored in the global `LogBuffer`. The log screen shows both, so a field is as visible as the message: the rule about tokens and secret values covers fields too.
 
 ```rust
 tracing::info!("User action completed");
-tracing::debug!("API response: {:?}", response);
+tracing::warn!(attempt = 2, "Failed to load metadata");
 tracing::error!("Operation failed: {}", error);
 ```
+
+- Audit entries (`src/vault/audit_log.rs`) say what happened to what in fields: `action`, then `path` or `policy`, then counts. They have no message; the log screen shows `secret.list path=/myapp count=3`
+- "Authenticated" (`auth.success`) is logged by `AuthAudit::accepted()` once Vault has answered a request with success, never when the client is created
+- Tests read the log through `log_buffer::capture()`, which gives each test a buffer of its own. Do not use `tracing::subscriber::set_default` in tests: with tests running in parallel it loses events
 
 ## Testing with Vault Dev Server
 
