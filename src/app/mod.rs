@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 pub mod filter;
 pub mod navigation;
@@ -86,8 +86,13 @@ impl App {
     pub async fn initialize(&mut self) -> Result<()> {
         tracing::info!("Initializing application");
 
-        // Load initial path
-        self.navigation.refresh().await?;
+        // Load initial path. A failure here is fatal, so say which path
+        // could not be listed (a token without list access is a common cause).
+        let path = self.state.current_path();
+        self.navigation
+            .refresh()
+            .await
+            .with_context(|| format!("Failed to list initial path '{path}'"))?;
 
         Ok(())
     }

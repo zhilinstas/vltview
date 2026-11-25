@@ -12,7 +12,7 @@ pub fn redact_secret_value(value: &str) -> String {
 }
 
 /// Redact secret data for logging - shows keys but not values
-pub fn redact_secret_data(data: &HashMap<String, String>) -> HashMap<String, String> {
+pub fn redact_secret_data<V>(data: &HashMap<String, V>) -> HashMap<String, String> {
     data.keys()
         .map(|k| (k.clone(), "***REDACTED***".to_string()))
         .collect()

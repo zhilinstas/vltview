@@ -8,11 +8,12 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 use ratatui_textarea::{Input, TextArea};
-use std::collections::HashMap;
 
+use crate::app::secret::{display_value, edited_value, json_type_name};
 use crate::tui::action::Action;
 use crate::tui::component::Component;
 use crate::tui::context::{ComponentContext, RenderContext};
+use crate::vault::SecretData;
 
 /// Edit mode for the form
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,8 +36,14 @@ pub struct EditViewComponent {
     /// Secret path
     path: String,
 
-    /// Fields (key-value pairs) - stored as Vec for ordering
+    /// Fields (key-value pairs) - stored as Vec for ordering.
+    /// Values are held as editable text; see `typed_originals`.
     fields: Vec<(String, String)>,
+
+    /// Original values of the fields that were not strings when loaded
+    /// (numbers, booleans, null, arrays, objects), by key. Used on save so
+    /// those fields keep their JSON type instead of being stringified.
+    typed_originals: SecretData,
 
     /// Selected field index
     selected_index: usize,
@@ -65,9 +72,17 @@ pub struct EditViewComponent {
 
 impl EditViewComponent {
     /// Create a new edit view component for an existing secret
-    pub fn new(path: String, secret: HashMap<String, String>) -> Self {
-        let mut fields: Vec<(String, String)> = secret.into_iter().collect();
+    pub fn new(path: String, secret: SecretData) -> Self {
+        let mut fields: Vec<(String, String)> = secret
+            .iter()
+            .map(|(key, value)| (key.clone(), display_value(value)))
+            .collect();
         fields.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let typed_originals: SecretData = secret
+            .into_iter()
+            .filter(|(_, value)| !value.is_string())
+            .collect();
 
         let mut key_textarea = TextArea::default();
         let mut value_textarea = TextArea::default();
@@ -79,6 +94,7 @@ impl EditViewComponent {
         Self {
             path,
             fields,
+            typed_originals,
             selected_index: 0,
             mode: EditMode::Navigate,
             key_textarea,
@@ -102,6 +118,7 @@ impl EditViewComponent {
         Self {
             path,
             fields: vec![("".to_string(), "".to_string())],
+            typed_originals: SecretData::new(),
             selected_index: 0,
             mode: EditMode::EditKey,
             key_textarea,
@@ -118,9 +135,40 @@ impl EditViewComponent {
         &self.path
     }
 
-    /// Get secret data as HashMap
-    pub fn secret_data(&self) -> HashMap<String, String> {
-        self.fields.iter().cloned().collect()
+    /// Get secret data for saving, with value types restored.
+    ///
+    /// Fails with a message for the user if a field that held a non-string
+    /// value was edited into something that is not valid JSON.
+    pub fn secret_data(&self) -> Result<SecretData, String> {
+        self.fields
+            .iter()
+            .map(|(key, text)| Ok((key.clone(), self.value_for_save(key, text)?)))
+            .collect()
+    }
+
+    /// Value to store for a field: see `edited_value` for the rules
+    fn value_for_save(&self, key: &str, text: &str) -> Result<serde_json::Value, String> {
+        let original = self.typed_originals.get(key);
+        edited_value(text, original).map_err(|_| {
+            let kind = original.map(json_type_name).unwrap_or("value");
+            format!(
+                "Field '{key}' holds a JSON {kind}, and its new value is not valid JSON. \
+                 Fix it, or put it in double quotes to save it as text."
+            )
+        })
+    }
+
+    /// Rename the selected field's key, keeping its original type attached
+    fn rename_selected_key(&mut self, new_key: String) {
+        if let Some((key, _)) = self.fields.get_mut(self.selected_index) {
+            if *key != new_key
+                && let Some(original) = self.typed_originals.remove(key.as_str())
+            {
+                self.typed_originals.insert(new_key.clone(), original);
+            }
+            *key = new_key;
+            self.has_changes = true;
+        }
     }
 
     /// Check if in edit mode
@@ -129,11 +177,11 @@ impl EditViewComponent {
     }
 
     /// Get fields as HashMap for saving
-    pub fn get_data(&self) -> HashMap<String, String> {
+    pub fn get_data(&self) -> Result<SecretData, String> {
         self.fields
             .iter()
             .filter(|(k, _)| !k.is_empty())
-            .cloned()
+            .map(|(key, text)| Ok((key.clone(), self.value_for_save(key, text)?)))
             .collect()
     }
 
@@ -209,10 +257,8 @@ impl EditViewComponent {
                 }
             }
             EditMode::EditKey => {
-                if let Some((key, _)) = self.fields.get_mut(self.selected_index) {
-                    *key = self.key_textarea.lines().join("\n");
-                    self.has_changes = true;
-                }
+                let new_key = self.key_textarea.lines().join("\n");
+                self.rename_selected_key(new_key);
             }
             EditMode::Navigate => {}
         }
@@ -230,10 +276,8 @@ impl EditViewComponent {
         match self.mode {
             EditMode::EditKey => {
                 // Save current key edit
-                if let Some((key, _)) = self.fields.get_mut(self.selected_index) {
-                    *key = self.key_textarea.lines().join("\n");
-                    self.has_changes = true;
-                }
+                let new_key = self.key_textarea.lines().join("\n");
+                self.rename_selected_key(new_key);
                 // Start editing the value
                 if let Some((_, value)) = self.fields.get(self.selected_index) {
                     self.value_textarea =
@@ -306,7 +350,9 @@ impl EditViewComponent {
             && self.mode == EditMode::Navigate
             && !self.fields.is_empty()
         {
-            self.fields.remove(self.selected_index);
+            let (removed_key, _) = self.fields.remove(self.selected_index);
+            // A field added later under the same name starts as a string
+            self.typed_originals.remove(&removed_key);
             self.has_changes = true;
             if self.selected_index >= self.fields.len() && self.selected_index > 0 {
                 self.selected_index -= 1;
@@ -710,9 +756,14 @@ impl Component for EditViewComponent {
 
                     // Save secret
                     (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
-                        let path = self.path.clone();
-                        let data = self.secret_data();
-                        Ok(Some(Action::SaveSecret { path, data }))
+                        // Refuse to save rather than change a value's type
+                        match self.secret_data() {
+                            Ok(data) => Ok(Some(Action::SaveSecret {
+                                path: self.path.clone(),
+                                data,
+                            })),
+                            Err(message) => Ok(Some(Action::SetError { message })),
+                        }
                     }
 
                     // Cancel/Exit
@@ -866,12 +917,13 @@ fn crossterm_to_textarea_input(key: KeyEvent) -> Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_edit_view_creation() {
-        let mut secret = HashMap::new();
-        secret.insert("username".to_string(), "admin".to_string());
-        secret.insert("password".to_string(), "secret123".to_string());
+        let mut secret = SecretData::new();
+        secret.insert("username".to_string(), "admin".into());
+        secret.insert("password".to_string(), "secret123".into());
 
         let view = EditViewComponent::new("/secret/test".to_string(), secret);
         assert_eq!(view.path(), "/secret/test");
@@ -891,10 +943,10 @@ mod tests {
 
     #[test]
     fn test_navigation() {
-        let mut secret = HashMap::new();
-        secret.insert("key1".to_string(), "value1".to_string());
-        secret.insert("key2".to_string(), "value2".to_string());
-        secret.insert("key3".to_string(), "value3".to_string());
+        let mut secret = SecretData::new();
+        secret.insert("key1".to_string(), "value1".into());
+        secret.insert("key2".to_string(), "value2".into());
+        secret.insert("key3".to_string(), "value3".into());
 
         let mut view = EditViewComponent::new("/secret/test".to_string(), secret);
 
@@ -915,8 +967,8 @@ mod tests {
 
     #[test]
     fn test_mode_transitions() {
-        let mut secret = HashMap::new();
-        secret.insert("key".to_string(), "value".to_string());
+        let mut secret = SecretData::new();
+        secret.insert("key".to_string(), "value".into());
 
         let mut view = EditViewComponent::new("/secret/test".to_string(), secret);
 
@@ -941,10 +993,133 @@ mod tests {
             ("password".to_string(), "secret".to_string()),
         ];
 
-        let data = view.get_data();
+        let data = view.get_data().unwrap();
         assert_eq!(data.len(), 2);
-        assert_eq!(data.get("username"), Some(&"admin".to_string()));
-        assert_eq!(data.get("password"), Some(&"secret".to_string()));
+        assert_eq!(data.get("username"), Some(&json!("admin")));
+        assert_eq!(data.get("password"), Some(&json!("secret")));
         assert!(!data.contains_key(""));
+    }
+
+    fn typed_secret() -> SecretData {
+        serde_json::from_value(json!({
+            "host": "db",
+            "port": 5432,
+            "tls": true,
+            "tags": ["a", "b"],
+            "note": null,
+            "numeric_string": "123"
+        }))
+        .unwrap()
+    }
+
+    /// Replace the value of the field named `key`, as the value editor does
+    fn set_value(view: &mut EditViewComponent, key: &str, text: &str) {
+        view.selected_index = view.fields.iter().position(|(k, _)| k == key).unwrap();
+        view.start_edit_value();
+        view.value_textarea = TextArea::new(vec![text.to_string()]);
+        view.confirm_edit();
+    }
+
+    #[test]
+    fn test_save_without_edits_is_lossless() {
+        // Regression: non-string values were dropped on load, so opening the
+        // editor and saving deleted them from Vault.
+        let secret = typed_secret();
+        let view = EditViewComponent::new("/secret/test".to_string(), secret.clone());
+
+        assert_eq!(view.fields.len(), 6);
+        assert_eq!(view.secret_data().unwrap(), secret);
+    }
+
+    #[test]
+    fn test_editing_one_field_keeps_other_types() {
+        let mut view = EditViewComponent::new("/secret/test".to_string(), typed_secret());
+
+        set_value(&mut view, "host", "db2");
+
+        let data = view.secret_data().unwrap();
+        assert_eq!(data["host"], json!("db2"));
+        assert_eq!(data["port"], json!(5432));
+        assert_eq!(data["tls"], json!(true));
+        assert_eq!(data["tags"], json!(["a", "b"]));
+        assert_eq!(data["note"], json!(null));
+        assert_eq!(data["numeric_string"], json!("123"));
+    }
+
+    #[test]
+    fn test_editing_typed_and_string_fields() {
+        let mut view = EditViewComponent::new("/secret/test".to_string(), typed_secret());
+
+        set_value(&mut view, "port", "5433");
+        set_value(&mut view, "tls", "false");
+        // A string stays a string even when its text looks like a number
+        set_value(&mut view, "numeric_string", "456");
+
+        let data = view.secret_data().unwrap();
+        assert_eq!(data["port"], json!(5433));
+        assert_eq!(data["tls"], json!(false));
+        assert_eq!(data["numeric_string"], json!("456"));
+    }
+
+    #[test]
+    fn test_invalid_json_in_a_typed_field_blocks_the_save() {
+        let mut view = EditViewComponent::new("/secret/test".to_string(), typed_secret());
+
+        set_value(&mut view, "tags", r#"["a","b"3"#);
+
+        let message = view.secret_data().unwrap_err();
+        assert!(message.contains("'tags'"), "{message}");
+        assert!(message.contains("array"), "{message}");
+
+        // Ctrl+S reports the problem instead of sending the write
+        let config = crate::config::Config {
+            vault_addr: "http://127.0.0.1:1".to_string(),
+            vault_token: "test-token".to_string(),
+            ..Default::default()
+        };
+        let app = crate::app::App::new(config, "/".to_string()).unwrap();
+        let focus = crate::tui::context::FocusState::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ComponentContext::new(&app, &focus, &tx);
+        let save = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let action = view.handle_key(save, &ctx).unwrap();
+        assert!(
+            matches!(action, Some(Action::SetError { .. })),
+            "{action:?}"
+        );
+
+        // Quoting it is the explicit way to store text instead
+        set_value(&mut view, "tags", r#""a,b""#);
+        assert_eq!(view.secret_data().unwrap()["tags"], json!("a,b"));
+    }
+
+    #[test]
+    fn test_renaming_a_typed_field_keeps_its_type() {
+        let mut view = EditViewComponent::new("/secret/test".to_string(), typed_secret());
+
+        view.selected_index = view.fields.iter().position(|(k, _)| k == "port").unwrap();
+        view.start_edit_key();
+        view.key_textarea = TextArea::new(vec!["db_port".to_string()]);
+        view.confirm_edit();
+
+        let data = view.secret_data().unwrap();
+        assert!(!data.contains_key("port"));
+        assert_eq!(data["db_port"], json!(5432));
+    }
+
+    #[test]
+    fn test_new_and_readded_fields_are_strings() {
+        let mut view = EditViewComponent::new("/secret/test".to_string(), typed_secret());
+
+        // Delete the numeric field, then add a new one with the same name
+        view.selected_index = view.fields.iter().position(|(k, _)| k == "port").unwrap();
+        view.delete_field();
+        view.confirm_delete_field();
+        view.fields.push(("port".to_string(), "8080".to_string()));
+        view.fields.push(("retries".to_string(), "3".to_string()));
+
+        let data = view.secret_data().unwrap();
+        assert_eq!(data["port"], json!("8080"));
+        assert_eq!(data["retries"], json!("3"));
     }
 }

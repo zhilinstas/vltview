@@ -396,4 +396,8 @@ Clipboard manager automatically clears copied secrets after 30 seconds:
 - **Never log tokens or secret values** - use `audit_log::redact_secret_value()` if needed
 - **Apply rate limiting** to new Vault API operations
 - **Sanitize all user input** going to Vault API
+- **Build request URLs with `sanitize::vault_url()`**, never `format!`. It percent-encodes each path segment, so a name containing `%2e%2e`, `?` or `#` cannot change which endpoint is called
+- **Check the HTTP status of every response** (`ensure_success` in `kv.rs`). A write that Vault rejects must reach the UI as an error
+- **Keep secret values as `vault::SecretData`** (`HashMap<String, serde_json::Value>`), not strings. Converting to `String` anywhere on the load path deletes non-string fields on the next save. Use `app::secret::display_value()` to show a value and `edited_value()` to turn edited text back into a value
+- **Async completions must say what they are for** (path, version) and be ignored when the user has moved on; see the `SecretLoaded` guard in `Root::process_action`
 - Use TLS verification by default (`--insecure` flag for dev only, warns user)

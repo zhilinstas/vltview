@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 /// Input mode for the main screen
@@ -338,6 +338,7 @@ impl MainScreen {
             ];
             let error_widget = Paragraph::new(error_text)
                 .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true })
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
@@ -486,6 +487,12 @@ impl Component for MainScreen {
         // Handle create secret input mode
         if self.input_mode == InputMode::CreateSecret {
             return self.handle_create_secret_input(key, ctx);
+        }
+
+        // While the filter is being typed, every key belongs to it. Without
+        // this, letters such as q, p and r fire the global shortcuts below.
+        if self.focused_pane == FocusedPane::Navigation && self.navigation_pane.captures_input() {
+            return self.navigation_pane.handle_key(key, ctx);
         }
 
         // If edit view is active and focused, let it handle Tab for mode switching
@@ -640,10 +647,23 @@ impl Component for MainScreen {
                     }
                 }
 
+                // The edit view is deliberately left alone: a preview that
+                // completes late must not throw away an edit in progress.
+                // It is closed by `SecretSaved`, or by the user.
                 self.detail_view = Some(detail_view);
-                self.edit_view = None;
                 self.error_message = None;
                 self.is_loading = false;
+            }
+
+            // The write was confirmed by Vault: the edit is done
+            Action::SecretSaved { path } => {
+                if self
+                    .edit_view
+                    .as_ref()
+                    .is_some_and(|view| view.path() == path)
+                {
+                    self.edit_view = None;
+                }
             }
 
             // Edit secret
@@ -696,8 +716,17 @@ impl Component for MainScreen {
             }
 
             // Secret version loaded successfully
-            Action::SecretVersionLoaded { version, data } => {
-                if let Some(detail_view) = &mut self.detail_view {
+            Action::SecretVersionLoaded {
+                path,
+                version,
+                data,
+            } => {
+                // Ignore a version that belongs to a secret the user has
+                // since left: showing it here would let it be saved over
+                // the secret now on screen.
+                if let Some(detail_view) = &mut self.detail_view
+                    && detail_view.path() == path
+                {
                     detail_view.load_version(*version, data.clone());
                 }
                 self.is_loading = false;
@@ -711,8 +740,16 @@ impl Component for MainScreen {
 
             // Version loaded for editing (create from old version)
             Action::VersionLoadedForEdit { path, data } => {
-                self.edit_view = Some(EditViewComponent::new(path.clone(), data.clone()));
-                self.focused_pane = FocusedPane::Content;
+                // Only open the editor if the user is still on that secret
+                // and has not started another edit in the meantime.
+                let still_viewing = self
+                    .detail_view
+                    .as_ref()
+                    .is_some_and(|view| view.path() == path);
+                if still_viewing && self.edit_view.is_none() {
+                    self.edit_view = Some(EditViewComponent::new(path.clone(), data.clone()));
+                    self.focused_pane = FocusedPane::Content;
+                }
                 self.is_loading = false;
             }
 
@@ -921,4 +958,180 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::tui::context::FocusState;
+    use crate::vault::SecretData;
+    use serde_json::json;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    fn test_app() -> App {
+        let config = Config {
+            vault_addr: "http://127.0.0.1:1".to_string(),
+            vault_token: "test-token".to_string(),
+            ..Config::default()
+        };
+        App::new(config, "/".to_string()).unwrap()
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn secret(value: serde_json::Value) -> SecretData {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn loaded(path: &str, value: serde_json::Value) -> Action {
+        Action::SecretLoaded {
+            path: path.to_string(),
+            data: secret(value),
+            metadata: None,
+        }
+    }
+
+    /// Run `body` with a screen and the context components expect
+    fn with_screen(body: impl FnOnce(&mut MainScreen, &mut ComponentContext)) {
+        let app = test_app();
+        let focus = FocusState::new();
+        let (tx, _rx) = unbounded_channel();
+        let mut ctx = ComponentContext::new(&app, &focus, &tx);
+        let mut screen = MainScreen::new();
+        body(&mut screen, &mut ctx);
+    }
+
+    #[test]
+    fn filter_typing_does_not_trigger_global_shortcuts() {
+        // Regression: with the filter open, "q" quit the app, "p" opened the
+        // policy screen, "r" refreshed, and Tab moved focus away.
+        with_screen(|screen, ctx| {
+            screen.update(loaded("/a", json!({"k": "v"})), ctx).unwrap();
+
+            let action = screen.handle_key(key(KeyCode::Char('/')), ctx).unwrap();
+            assert!(matches!(action, Some(Action::StartFilter)));
+            screen.update(Action::StartFilter, ctx).unwrap();
+
+            let mut typed = String::new();
+            for c in ['q', 'p', 'r', '?', '~', 'h', 'l'] {
+                typed.push(c);
+                match screen.handle_key(key(KeyCode::Char(c)), ctx).unwrap() {
+                    Some(Action::UpdateFilter { text }) => assert_eq!(text, typed),
+                    other => panic!("'{c}' escaped the filter as {other:?}"),
+                }
+            }
+
+            assert!(screen.handle_key(key(KeyCode::Tab), ctx).unwrap().is_none());
+            assert_eq!(screen.focused_pane, FocusedPane::Navigation);
+
+            // Leaving the filter gives the shortcuts back
+            let action = screen.handle_key(key(KeyCode::Esc), ctx).unwrap();
+            assert!(matches!(action, Some(Action::CancelFilter)));
+            screen.update(Action::CancelFilter, ctx).unwrap();
+            let action = screen.handle_key(key(KeyCode::Char('q')), ctx).unwrap();
+            assert!(matches!(action, Some(Action::Quit)));
+        });
+    }
+
+    #[test]
+    fn late_secret_load_does_not_close_an_open_edit() {
+        // Regression: any SecretLoaded closed the edit view, so a preview
+        // finishing late discarded the edit in progress.
+        with_screen(|screen, ctx| {
+            screen.update(loaded("/a", json!({"k": "v"})), ctx).unwrap();
+            screen.update(Action::EditSecret, ctx).unwrap();
+            assert_eq!(screen.edit_view.as_ref().unwrap().path(), "/a");
+
+            screen
+                .update(loaded("/b", json!({"other": "x"})), ctx)
+                .unwrap();
+
+            let edit = screen.edit_view.as_ref().expect("edit view must survive");
+            assert_eq!(edit.path(), "/a");
+            assert_eq!(edit.secret_data().unwrap(), secret(json!({"k": "v"})));
+        });
+    }
+
+    #[test]
+    fn only_a_confirmed_save_of_the_same_secret_closes_the_edit() {
+        with_screen(|screen, ctx| {
+            screen.update(loaded("/a", json!({"k": "v"})), ctx).unwrap();
+            screen.update(Action::EditSecret, ctx).unwrap();
+
+            let other = Action::SecretSaved {
+                path: "/b".to_string(),
+            };
+            screen.update(other, ctx).unwrap();
+            assert!(screen.edit_view.is_some());
+
+            // A failed save reports an error and keeps the edit buffer
+            let failed = Action::SetError {
+                message: "Failed to save secret: Access denied".to_string(),
+            };
+            screen.update(failed, ctx).unwrap();
+            assert!(screen.edit_view.is_some());
+
+            let saved = Action::SecretSaved {
+                path: "/a".to_string(),
+            };
+            screen.update(saved, ctx).unwrap();
+            assert!(screen.edit_view.is_none());
+        });
+    }
+
+    #[test]
+    fn version_result_for_another_secret_is_ignored() {
+        // Regression: SecretVersionLoaded carried no path, so an old version
+        // of A could be loaded into B's view and then saved over B.
+        with_screen(|screen, ctx| {
+            screen
+                .update(loaded("/b", json!({"b": "current"})), ctx)
+                .unwrap();
+
+            let stale = Action::SecretVersionLoaded {
+                path: "/a".to_string(),
+                version: 1,
+                data: secret(json!({"a": "old"})),
+            };
+            screen.update(stale, ctx).unwrap();
+            let detail = screen.detail_view.as_ref().unwrap();
+            assert_eq!(detail.secret_data(), secret(json!({"b": "current"})));
+
+            let matching = Action::SecretVersionLoaded {
+                path: "/b".to_string(),
+                version: 1,
+                data: secret(json!({"b": "old"})),
+            };
+            screen.update(matching, ctx).unwrap();
+            let detail = screen.detail_view.as_ref().unwrap();
+            assert_eq!(detail.secret_data(), secret(json!({"b": "old"})));
+        });
+    }
+
+    #[test]
+    fn version_for_edit_opens_only_for_the_secret_on_screen() {
+        with_screen(|screen, ctx| {
+            screen
+                .update(loaded("/b", json!({"b": "current"})), ctx)
+                .unwrap();
+
+            let stale = Action::VersionLoadedForEdit {
+                path: "/a".to_string(),
+                data: secret(json!({"a": "old"})),
+            };
+            screen.update(stale, ctx).unwrap();
+            assert!(screen.edit_view.is_none());
+
+            let matching = Action::VersionLoadedForEdit {
+                path: "/b".to_string(),
+                data: secret(json!({"b": "old"})),
+            };
+            screen.update(matching, ctx).unwrap();
+            assert_eq!(screen.edit_view.as_ref().unwrap().path(), "/b");
+        });
+    }
 }

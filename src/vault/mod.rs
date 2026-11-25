@@ -15,7 +15,7 @@ pub mod response;
 pub mod sanitize;
 
 pub use auth::AuthManager;
-pub use kv::KvEngine;
+pub use kv::{KvEngine, SecretData};
 pub use policy::PolicyApi;
 
 /// Maximum concurrent API requests to Vault

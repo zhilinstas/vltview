@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::vault::SecretData;
 
 /// All possible actions in the VltView application
 ///
@@ -124,7 +124,7 @@ pub enum Action {
     /// Secret loaded successfully (async completion)
     SecretLoaded {
         path: String,
-        data: HashMap<String, String>,
+        data: SecretData,
         metadata: Option<SecretMetadata>,
     },
 
@@ -135,10 +135,7 @@ pub enum Action {
     CreateSecret { name: String },
 
     /// Save current secret being edited
-    SaveSecret {
-        path: String,
-        data: HashMap<String, String>,
-    },
+    SaveSecret { path: String, data: SecretData },
 
     /// Secret saved successfully
     SecretSaved { path: String },
@@ -154,15 +151,13 @@ pub enum Action {
 
     /// Secret version loaded successfully (async completion)
     SecretVersionLoaded {
+        path: String,
         version: u64,
-        data: HashMap<String, String>,
+        data: SecretData,
     },
 
     /// Secret version loaded for editing (create new from old)
-    VersionLoadedForEdit {
-        path: String,
-        data: HashMap<String, String>,
-    },
+    VersionLoadedForEdit { path: String, data: SecretData },
 
     /// Create new version from historical version
     CreateFromVersion { path: String, version: u64 },

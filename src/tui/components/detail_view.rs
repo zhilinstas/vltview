@@ -7,11 +7,12 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
-use std::collections::HashMap;
 
+use crate::app::secret::display_value;
 use crate::tui::action::Action;
 use crate::tui::component::Component;
 use crate::tui::context::{ComponentContext, RenderContext};
+use crate::vault::SecretData;
 
 /// Detail view mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,8 +38,8 @@ pub struct VersionInfo {
 /// - Data mode: Shows key-value pairs with masking toggle
 /// - Versions mode: Shows version history with status indicators
 pub struct DetailViewComponent {
-    /// Current secret data
-    secret: HashMap<String, String>,
+    /// Current secret data, with each value's JSON type preserved
+    secret: SecretData,
 
     /// Selected key index (for data mode)
     selected_index: usize,
@@ -72,7 +73,7 @@ pub struct DetailViewComponent {
 
 impl DetailViewComponent {
     /// Create a new detail view component
-    pub fn new(secret: HashMap<String, String>, path: String) -> Self {
+    pub fn new(secret: SecretData, path: String) -> Self {
         Self {
             secret,
             selected_index: 0,
@@ -119,12 +120,12 @@ impl DetailViewComponent {
     }
 
     /// Get a clone of the secret data (for editing)
-    pub fn secret_data(&self) -> HashMap<String, String> {
+    pub fn secret_data(&self) -> SecretData {
         self.secret.clone()
     }
 
     /// Update secret data (when loading a different version)
-    pub fn update_secret_data(&mut self, data: HashMap<String, String>) {
+    pub fn update_secret_data(&mut self, data: SecretData) {
         self.secret = data;
         self.selected_index = 0;
     }
@@ -135,10 +136,10 @@ impl DetailViewComponent {
         keys.get(self.selected_index).cloned()
     }
 
-    /// Get selected value
+    /// Get selected value as display text
     pub fn selected_value(&self) -> Option<String> {
         self.selected_key()
-            .and_then(|key| self.secret.get(&key).cloned())
+            .and_then(|key| self.secret.get(&key).map(display_value))
     }
 
     /// Get selected version
@@ -161,7 +162,7 @@ impl DetailViewComponent {
     }
 
     /// Load data for a specific version
-    pub fn load_version(&mut self, version: u64, data: HashMap<String, String>) {
+    pub fn load_version(&mut self, version: u64, data: SecretData) {
         self.secret = data;
         self.viewing_version = Some(version);
         self.selected_index = 0;
@@ -244,16 +245,17 @@ impl DetailViewComponent {
             return "(empty)".to_string();
         }
 
-        // Show first and last character for short values
-        if value.len() <= 4 {
-            "•".repeat(value.len())
-        } else {
-            format!(
-                "{}{}{}",
-                &value[..1],
-                "•".repeat(value.len() - 2),
-                &value[value.len() - 1..]
-            )
+        // Work in characters, not bytes: slicing a multi-byte character
+        // (any non-ASCII secret) by byte offset panics.
+        let mut chars = value.chars();
+        let count = chars.clone().count();
+
+        // Fully mask short values, show first and last character otherwise
+        match (chars.next(), chars.next_back()) {
+            (Some(first), Some(last)) if count > 4 => {
+                format!("{}{}{}", first, "•".repeat(count - 2), last)
+            }
+            _ => "•".repeat(count),
         }
     }
 
@@ -353,7 +355,7 @@ impl DetailViewComponent {
             .iter()
             .enumerate()
             .map(|(i, key)| {
-                let value = self.secret.get(key).unwrap();
+                let value = self.secret.get(key).map(display_value).unwrap_or_default();
 
                 // Handle multiline values and masking
                 let display_value = if self.show_values {
@@ -365,7 +367,7 @@ impl DetailViewComponent {
                         value.clone()
                     }
                 } else {
-                    self.mask_value(value)
+                    self.mask_value(&value)
                 };
 
                 let style = if i == self.selected_index {
@@ -723,9 +725,9 @@ mod tests {
 
     #[test]
     fn test_detail_view_creation() {
-        let mut secret = HashMap::new();
-        secret.insert("username".to_string(), "admin".to_string());
-        secret.insert("password".to_string(), "secret123".to_string());
+        let mut secret = SecretData::new();
+        secret.insert("username".to_string(), "admin".into());
+        secret.insert("password".to_string(), "secret123".into());
 
         let view = DetailViewComponent::new(secret, "/secret/test".to_string());
         assert_eq!(view.selected_index, 0);
@@ -735,10 +737,10 @@ mod tests {
 
     #[test]
     fn test_navigation() {
-        let mut secret = HashMap::new();
-        secret.insert("key1".to_string(), "value1".to_string());
-        secret.insert("key2".to_string(), "value2".to_string());
-        secret.insert("key3".to_string(), "value3".to_string());
+        let mut secret = SecretData::new();
+        secret.insert("key1".to_string(), "value1".into());
+        secret.insert("key2".to_string(), "value2".into());
+        secret.insert("key3".to_string(), "value3".into());
 
         let mut view = DetailViewComponent::new(secret, "/secret/test".to_string());
 
@@ -759,8 +761,8 @@ mod tests {
 
     #[test]
     fn test_toggle_values() {
-        let mut secret = HashMap::new();
-        secret.insert("key".to_string(), "value".to_string());
+        let mut secret = SecretData::new();
+        secret.insert("key".to_string(), "value".into());
 
         let mut view = DetailViewComponent::new(secret, "/secret/test".to_string());
 
@@ -773,7 +775,7 @@ mod tests {
 
     #[test]
     fn test_mask_value() {
-        let secret = HashMap::new();
+        let secret = SecretData::new();
         let view = DetailViewComponent::new(secret, "/secret/test".to_string());
 
         assert_eq!(view.mask_value(""), "(empty)");
@@ -786,9 +788,42 @@ mod tests {
     }
 
     #[test]
+    fn test_mask_value_non_ascii() {
+        // Regression: byte slicing panicked on any multi-byte character at
+        // either end of the value, crashing the app on preview.
+        let view = DetailViewComponent::new(SecretData::new(), "/secret/test".to_string());
+
+        assert_eq!(view.mask_value("rotated-ünï✓"), "r••••••••••✓");
+        assert_eq!(view.mask_value("пароль123"), "п•••••••3");
+        assert_eq!(view.mask_value("pass€"), "p•••€");
+        assert_eq!(view.mask_value("✓✓✓✓"), "••••");
+        assert_eq!(view.mask_value("é"), "•");
+        assert_eq!(view.mask_value("🔑secret🔑"), "🔑••••••🔑");
+    }
+
+    #[test]
+    fn test_non_string_values_are_kept_and_displayed() {
+        let secret: SecretData = serde_json::from_value(serde_json::json!({
+            "host": "db", "port": 5432, "tls": true
+        }))
+        .unwrap();
+
+        let mut view = DetailViewComponent::new(secret.clone(), "/secret/test".to_string());
+
+        // Nothing is dropped on the way to the editor
+        assert_eq!(view.secret_data(), secret);
+        assert_eq!(view.sorted_keys(), vec!["host", "port", "tls"]);
+
+        view.move_down();
+        assert_eq!(view.selected_value().as_deref(), Some("5432"));
+        view.move_down();
+        assert_eq!(view.selected_value().as_deref(), Some("true"));
+    }
+
+    #[test]
     fn test_toggle_mode() {
-        let mut secret = HashMap::new();
-        secret.insert("key".to_string(), "value".to_string());
+        let mut secret = SecretData::new();
+        secret.insert("key".to_string(), "value".into());
 
         let mut view = DetailViewComponent::new(secret, "/secret/test".to_string());
 

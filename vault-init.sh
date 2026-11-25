@@ -385,7 +385,7 @@ vault kv put secret/company/finance/accounting \
 vault kv put secret/company/finance/banking \
     account_number=****1234 \
     routing_number=987654321 \
-    bank_name=Example Bank
+    bank_name="Example Bank"
 
 vault kv put secret/company/engineering/github \
     token=ghp_companytoken123 \

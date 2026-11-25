@@ -20,7 +20,7 @@ cargo-binstall = "1.26.2"
 description = "Check formatting"
 run = "cargo fmt --all -- --check"
 
-# `-A dead_code` is temporary: 20 unused or half-wired items predate this gate
+# `-A dead_code` is temporary: unused or half-wired items predate this gate
 # (unhandled Action variants, FocusState, the cache stub). Drop the flag once
 # they are wired up or deleted. Plain `cargo build` still reports them.
 [tasks.clippy]

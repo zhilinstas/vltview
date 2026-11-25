@@ -30,7 +30,7 @@ struct Cli {
     /// Vault token (overrides config and env)
     /// ⚠️  WARNING: Using CLI args for tokens exposes them in process lists!
     /// ⚠️  Prefer VAULT_TOKEN environment variable or config file for security.
-    #[arg(long, env = "VAULT_TOKEN")]
+    #[arg(long, env = "VAULT_TOKEN", hide_env_values = true)]
     vault_token: Option<String>,
 
     /// Vault namespace (for Enterprise)
@@ -146,5 +146,28 @@ impl tracing::field::Visit for MessageVisitor {
                 self.message = self.message[1..self.message.len() - 1].to_string();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn help_never_prints_the_token_from_the_environment() {
+        // Regression: `--help` printed "[env: VAULT_TOKEN=<the token>]"
+        let command = Cli::command();
+        let token_arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "vault_token")
+            .expect("vault_token argument");
+
+        assert!(token_arg.is_hide_env_values_set());
     }
 }

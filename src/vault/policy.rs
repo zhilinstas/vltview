@@ -5,7 +5,7 @@ use tokio::sync::Semaphore;
 
 use super::audit_log;
 use super::auth::AuthManager;
-use super::sanitize::sanitize_vault_error;
+use super::sanitize::{sanitize_vault_error, vault_url};
 
 /// Policy API client for ACL policies with rate limiting
 #[derive(Clone)]
@@ -88,9 +88,10 @@ impl PolicyApi {
         // Acquire rate limit permit
         let _permit = self.rate_limiter.acquire().await?;
 
-        let url = format!("{}/v1/sys/policies/acl/{}", self.base_url, name);
+        // The name is a single, percent-encoded URL segment
+        let url = vault_url(&self.base_url, &["v1", "sys", "policies", "acl", name], "/")?;
 
-        let mut req = self.client.get(&url);
+        let mut req = self.client.get(url);
         req = self.auth.add_auth_header(req);
 
         if let Some(ns) = &self.namespace {

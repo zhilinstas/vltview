@@ -57,6 +57,10 @@ pub struct Root {
 
     /// Pending clipboard text (to be handled by Tui)
     pending_clipboard: Option<String>,
+
+    /// Path of the most recently requested secret. Loads are not cancelled,
+    /// so results can arrive out of order; only the latest request is shown.
+    latest_secret_request: Option<String>,
 }
 
 impl Root {
@@ -72,6 +76,7 @@ impl Root {
             async_manager: AsyncManager::new(runtime),
             should_quit: false,
             pending_clipboard: None,
+            latest_secret_request: None,
         }
     }
 
@@ -138,6 +143,7 @@ impl Root {
             Action::ViewSecret { path, should_focus } => {
                 let path = path.clone();
                 let should_focus = *should_focus;
+                self.latest_secret_request = Some(path.clone());
                 self.spawn_load_secret(app, path, should_focus);
                 // Set loading state
                 let action_tx = self.action_sender();
@@ -280,8 +286,17 @@ impl Root {
                 self.help_overlay.update(action.clone(), &mut ctx)?;
             }
 
+            // A load that was overtaken by a newer request: drop it, so the
+            // content pane never shows a secret other than the last one asked for
+            Action::SecretLoaded { path, .. }
+                if self.latest_secret_request.as_deref() != Some(path.as_str()) =>
+            {
+                tracing::debug!("Ignoring stale secret load");
+            }
+
             // Main screen actions
             Action::SecretLoaded { .. }
+            | Action::SecretSaved { .. }
             | Action::EditSecret
             | Action::CreateSecret { .. }
             | Action::ShowCreateSecretInput
@@ -369,12 +384,9 @@ impl Root {
                 // Load secret data
                 let secret_data = vault_client.kv().get(&path).await?;
 
-                // Convert VaultSecret to HashMap<String, String>
-                let data: std::collections::HashMap<String, String> = secret_data
-                    .data
-                    .iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect();
+                // Keep every field with its JSON type. Dropping non-string
+                // values here would delete them from Vault on the next save.
+                let data = secret_data.data;
 
                 // Load metadata
                 let metadata = match vault_client.kv().get_metadata(&path).await {
@@ -516,12 +528,7 @@ impl Root {
     }
 
     /// Spawn async operation to save a secret
-    fn spawn_save_secret(
-        &mut self,
-        app: &App,
-        path: String,
-        data: std::collections::HashMap<String, String>,
-    ) {
+    fn spawn_save_secret(&mut self, app: &App, path: String, data: crate::vault::SecretData) {
         let secret_service = app.secret_service().clone();
 
         self.async_manager.spawn(
@@ -560,7 +567,11 @@ impl Root {
 
                 Ok(Action::Batch {
                     actions: vec![
-                        Action::SecretVersionLoaded { version, data },
+                        Action::SecretVersionLoaded {
+                            path: path.clone(),
+                            version,
+                            data,
+                        },
                         Action::SetLoading { loading: false },
                     ],
                 })
@@ -616,5 +627,87 @@ impl Root {
 
         // Always render help overlay on top (if visible)
         self.help_overlay.draw(frame, area, &ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn test_app() -> App {
+        let config = Config {
+            vault_addr: "http://127.0.0.1:1".to_string(),
+            vault_token: "test-token".to_string(),
+            ..Config::default()
+        };
+        App::new(config, "/".to_string()).unwrap()
+    }
+
+    fn loaded(path: &str, field: &str) -> Action {
+        Action::SecretLoaded {
+            path: path.to_string(),
+            data: serde_json::from_value(serde_json::json!({ field: "value" })).unwrap(),
+            metadata: None,
+        }
+    }
+
+    fn view(path: &str) -> Action {
+        Action::ViewSecret {
+            path: path.to_string(),
+            should_focus: false,
+        }
+    }
+
+    fn screen_text(root: &mut Root, app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| root.render(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn stale_secret_load_is_dropped() {
+        // Regression: loads are not cancelled, and the last one to *arrive*
+        // used to win, so the pane could show A while the cursor was on B.
+        let mut app = test_app();
+        let mut root = Root::new(tokio::runtime::Handle::current());
+        root.init(&app).unwrap();
+
+        // The user moves from A to B before A's load completes
+        root.process_action(view("/app/a"), &mut app).unwrap();
+        root.process_action(view("/app/b"), &mut app).unwrap();
+
+        // B's result arrives first, A's arrives late
+        root.process_action(loaded("/app/b", "field_b"), &mut app)
+            .unwrap();
+        root.process_action(loaded("/app/a", "field_a"), &mut app)
+            .unwrap();
+
+        let text = screen_text(&mut root, &app);
+        assert!(text.contains("Secret Details: /app/b"), "{text}");
+        assert!(text.contains("field_b"));
+        assert!(!text.contains("field_a"));
+    }
+
+    #[tokio::test]
+    async fn requested_secret_load_is_shown() {
+        let mut app = test_app();
+        let mut root = Root::new(tokio::runtime::Handle::current());
+        root.init(&app).unwrap();
+
+        root.process_action(view("/app/a"), &mut app).unwrap();
+        root.process_action(loaded("/app/a", "field_a"), &mut app)
+            .unwrap();
+
+        let text = screen_text(&mut root, &app);
+        assert!(text.contains("Secret Details: /app/a"), "{text}");
+        assert!(text.contains("field_a"));
     }
 }

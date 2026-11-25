@@ -47,6 +47,11 @@ url = "2.5"
 # Security
 zeroize = { version = "1.9", features = ["derive"] }
 
+[dev-dependencies]
+mockito = "1.7"
+# test-util: paused clock for the clipboard timeout tests
+tokio = { version = "1.54", features = ["test-util"] }
+
 [profile.release]
 opt-level = 3
 lto = true

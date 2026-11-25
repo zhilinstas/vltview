@@ -97,7 +97,7 @@ impl Tui {
             // Handle pending clipboard operations
             if let Some(text) = self.root.take_pending_clipboard() {
                 if let Some(clipboard) = &mut self.clipboard {
-                    match clipboard.copy_text(&text).await {
+                    match clipboard.copy_text(&text) {
                         Ok(()) => {
                             self.root.process_action(
                                 action::Action::SetStatus {

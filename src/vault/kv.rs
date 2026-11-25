@@ -1,5 +1,5 @@
 use anyhow::Result;
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -7,7 +7,17 @@ use tokio::sync::Semaphore;
 use super::audit_log;
 use super::auth::AuthManager;
 use super::response::{FullSecretMetadata, ListResponse, VaultResponse, VaultSecret};
-use super::sanitize::{sanitize_vault_error, sanitize_vault_path};
+use super::sanitize::{sanitize_vault_error, sanitize_vault_path, vault_url};
+
+/// Secret payload as stored in Vault: field name to JSON value.
+///
+/// KV v2 values are arbitrary JSON, not only strings. Keeping them as
+/// `serde_json::Value` end to end is what lets a read-modify-write cycle
+/// preserve numbers, booleans, nulls and nested structures.
+pub type SecretData = HashMap<String, serde_json::Value>;
+
+/// Mount point of the KV v2 engine
+const KV_MOUNT: &str = "secret";
 
 /// KV Engine API client for KV2 secrets with rate limiting
 #[derive(Clone)]
@@ -37,31 +47,46 @@ impl KvEngine {
         }
     }
 
-    /// List secrets at a path
-    pub async fn list(&self, path: &str) -> Result<Vec<String>> {
-        // Acquire rate limit permit
-        let _permit = self.rate_limiter.acquire().await?;
-
-        let sanitized_path = sanitize_vault_path(path)?;
-        let url = format!("{}/v1/secret/metadata{}", self.base_url, sanitized_path);
-
-        let mut req = self.client.get(&url).query(&[("list", "true")]);
+    /// Add the token and namespace headers
+    fn authorize(&self, mut req: RequestBuilder) -> RequestBuilder {
         req = self.auth.add_auth_header(req);
 
         if let Some(ns) = &self.namespace {
             req = req.header("X-Vault-Namespace", ns);
         }
 
+        req
+    }
+
+    /// List secrets at a path
+    ///
+    /// Vault answers 404 for a path with nothing under it, which is reported
+    /// as an empty list. Every other failure (403, 5xx, ...) is an error, so
+    /// a permission problem is not mistaken for an empty folder.
+    pub async fn list(&self, path: &str) -> Result<Vec<String>> {
+        // Acquire rate limit permit
+        let _permit = self.rate_limiter.acquire().await?;
+
+        let sanitized_path = sanitize_vault_path(path)?;
+        let url = vault_url(
+            &self.base_url,
+            &["v1", KV_MOUNT, "metadata"],
+            &sanitized_path,
+        )?;
+
+        let req = self.authorize(self.client.get(url).query(&[("list", "true")]));
         let response = req.send().await?;
 
-        if response.status().is_success() {
-            let vault_resp: VaultResponse<ListResponse> = response.json().await?;
-            let count = vault_resp.data.keys.len();
-            audit_log::log_secret_list(&sanitized_path, count);
-            Ok(vault_resp.data.keys)
-        } else {
-            Ok(Vec::new()) // TODO: Better error handling
+        if response.status() == StatusCode::NOT_FOUND {
+            audit_log::log_secret_list(&sanitized_path, 0);
+            return Ok(Vec::new());
         }
+
+        let response = ensure_success(response).await?;
+        let vault_resp: VaultResponse<ListResponse> = response.json().await?;
+        let count = vault_resp.data.keys.len();
+        audit_log::log_secret_list(&sanitized_path, count);
+        Ok(vault_resp.data.keys)
     }
 
     /// Get a secret at a path (latest version)
@@ -75,33 +100,17 @@ impl KvEngine {
         let _permit = self.rate_limiter.acquire().await?;
 
         let sanitized_path = sanitize_vault_path(path)?;
-        let url = format!("{}/v1/secret/data{}", self.base_url, sanitized_path);
+        let url = vault_url(&self.base_url, &["v1", KV_MOUNT, "data"], &sanitized_path)?;
 
-        let mut req = self.client.get(&url);
+        let mut req = self.client.get(url);
 
         // Add version query parameter if specified
         if let Some(v) = version {
             req = req.query(&[("version", v.to_string())]);
         }
 
-        req = self.auth.add_auth_header(req);
-
-        if let Some(ns) = &self.namespace {
-            req = req.header("X-Vault-Namespace", ns);
-        }
-
-        let response = req.send().await?;
-
-        // Check if the response is successful
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            let sanitized_error = sanitize_vault_error(status.as_u16(), &error_text);
-            anyhow::bail!("{}", sanitized_error);
-        }
+        let response = self.authorize(req).send().await?;
+        let response = ensure_success(response).await?;
 
         let vault_resp: VaultResponse<VaultSecret> = response.json().await?;
 
@@ -110,12 +119,12 @@ impl KvEngine {
     }
 
     /// Put (create/update) a secret
-    pub async fn put(&self, path: &str, data: HashMap<String, String>) -> Result<()> {
+    pub async fn put(&self, path: &str, data: SecretData) -> Result<()> {
         // Acquire rate limit permit
         let _permit = self.rate_limiter.acquire().await?;
 
         let sanitized_path = sanitize_vault_path(path)?;
-        let url = format!("{}/v1/secret/data{}", self.base_url, sanitized_path);
+        let url = vault_url(&self.base_url, &["v1", KV_MOUNT, "data"], &sanitized_path)?;
 
         // Redact secret data for logging
         let redacted_data = audit_log::redact_secret_data(&data);
@@ -125,14 +134,15 @@ impl KvEngine {
             "data": data
         });
 
-        let mut req = self.client.post(&url).json(&body);
-        req = self.auth.add_auth_header(req);
+        let response = self
+            .authorize(self.client.post(url).json(&body))
+            .send()
+            .await?;
 
-        if let Some(ns) = &self.namespace {
-            req = req.header("X-Vault-Namespace", ns);
-        }
+        // A rejected write (403, 400, ...) must surface as an error: reporting
+        // it as success makes the UI say "Saved" and drop the user's edits.
+        ensure_success(response).await?;
 
-        req.send().await?;
         audit_log::log_secret_write(&sanitized_path, data.len());
         Ok(())
     }
@@ -145,26 +155,14 @@ impl KvEngine {
         let sanitized_path = sanitize_vault_path(path)?;
         // Use metadata endpoint to permanently delete the secret
         // This removes all versions and metadata, so it won't appear in lists
-        let url = format!("{}/v1/secret/metadata{}", self.base_url, sanitized_path);
+        let url = vault_url(
+            &self.base_url,
+            &["v1", KV_MOUNT, "metadata"],
+            &sanitized_path,
+        )?;
 
-        let mut req = self.client.delete(&url);
-        req = self.auth.add_auth_header(req);
-
-        if let Some(ns) = &self.namespace {
-            req = req.header("X-Vault-Namespace", ns);
-        }
-
-        let response = req.send().await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            let sanitized_error = sanitize_vault_error(status.as_u16(), &error_text);
-            anyhow::bail!("{}", sanitized_error);
-        }
+        let response = self.authorize(self.client.delete(url)).send().await?;
+        ensure_success(response).await?;
 
         audit_log::log_secret_delete(&sanitized_path);
         Ok(())
@@ -176,30 +174,205 @@ impl KvEngine {
         let _permit = self.rate_limiter.acquire().await?;
 
         let sanitized_path = sanitize_vault_path(path)?;
-        let url = format!("{}/v1/secret/metadata{}", self.base_url, sanitized_path);
+        let url = vault_url(
+            &self.base_url,
+            &["v1", KV_MOUNT, "metadata"],
+            &sanitized_path,
+        )?;
 
-        let mut req = self.client.get(&url);
-        req = self.auth.add_auth_header(req);
-
-        if let Some(ns) = &self.namespace {
-            req = req.header("X-Vault-Namespace", ns);
-        }
-
-        let response = req.send().await?;
-
-        // Check if the response is successful
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            let sanitized_error = sanitize_vault_error(status.as_u16(), &error_text);
-            anyhow::bail!("{}", sanitized_error);
-        }
+        let response = self.authorize(self.client.get(url)).send().await?;
+        let response = ensure_success(response).await?;
 
         let vault_resp: VaultResponse<FullSecretMetadata> = response.json().await?;
 
         Ok(vault_resp.data)
+    }
+}
+
+/// Pass a successful response through; turn any other status into a
+/// sanitized error.
+async fn ensure_success(response: Response) -> Result<Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+
+    let status = response.status();
+    let error_text = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "Unknown error".to_string());
+    anyhow::bail!("{}", sanitize_vault_error(status.as_u16(), &error_text));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::{Matcher, Server, ServerGuard};
+    use serde_json::json;
+
+    fn engine(server: &ServerGuard) -> KvEngine {
+        KvEngine::new(
+            Client::new(),
+            server.url(),
+            AuthManager::new("test-token".to_string()),
+            None,
+            Arc::new(Semaphore::new(4)),
+        )
+    }
+
+    fn data(value: serde_json::Value) -> SecretData {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn put_reports_rejected_write_as_error() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/secret/data/app/db")
+            .with_status(403)
+            .with_body(r#"{"errors":["permission denied"]}"#)
+            .create_async()
+            .await;
+
+        let result = engine(&server)
+            .put("/app/db", data(json!({"k": "v"})))
+            .await;
+
+        mock.assert_async().await;
+        let err = result.expect_err("a 403 on write must not be reported as success");
+        assert_eq!(err.to_string(), "Access denied - insufficient permissions");
+    }
+
+    #[tokio::test]
+    async fn put_sends_token_and_keeps_value_types() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/secret/data/app/db")
+            .match_header("X-Vault-Token", "test-token")
+            .match_body(Matcher::Json(json!({
+                "data": {"host": "db", "port": 5432, "tls": true, "tags": ["a", "b"], "note": null}
+            })))
+            .with_status(200)
+            .with_body(r#"{"data":{"version":2}}"#)
+            .create_async()
+            .await;
+
+        engine(&server)
+            .put(
+                "/app/db",
+                data(json!({
+                    "host": "db", "port": 5432, "tls": true, "tags": ["a", "b"], "note": null
+                })),
+            )
+            .await
+            .unwrap();
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn get_returns_non_string_values() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/v1/secret/data/app/db")
+            .with_status(200)
+            .with_body(
+                r#"{"data":{"data":{"host":"db","port":5432,"tls":true},
+                    "metadata":{"version":1}}}"#,
+            )
+            .create_async()
+            .await;
+
+        let secret = engine(&server).get("/app/db").await.unwrap();
+
+        assert_eq!(secret.data["host"], json!("db"));
+        assert_eq!(secret.data["port"], json!(5432));
+        assert_eq!(secret.data["tls"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn list_reports_forbidden_as_error() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/v1/secret/metadata/app")
+            .match_query(Matcher::UrlEncoded("list".into(), "true".into()))
+            .with_status(403)
+            .create_async()
+            .await;
+
+        let err = engine(&server)
+            .list("/app")
+            .await
+            .expect_err("a 403 on list must not look like an empty folder");
+        assert_eq!(err.to_string(), "Access denied - insufficient permissions");
+    }
+
+    #[tokio::test]
+    async fn list_reports_server_error_as_error() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/v1/secret/metadata/app")
+            .match_query(Matcher::Any)
+            .with_status(503)
+            .create_async()
+            .await;
+
+        assert!(engine(&server).list("/app").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_treats_not_found_as_empty() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/v1/secret/metadata/empty")
+            .match_query(Matcher::Any)
+            .with_status(404)
+            .with_body(r#"{"errors":[]}"#)
+            .create_async()
+            .await;
+
+        assert!(engine(&server).list("/empty").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_root_returns_keys() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/v1/secret/metadata")
+            .match_query(Matcher::UrlEncoded("list".into(), "true".into()))
+            .with_status(200)
+            .with_body(r#"{"data":{"keys":["myapp/","prod/"]}}"#)
+            .create_async()
+            .await;
+
+        let keys = engine(&server).list("/").await.unwrap();
+        assert_eq!(keys, vec!["myapp/", "prod/"]);
+    }
+
+    #[tokio::test]
+    async fn encoded_dot_segments_stay_inside_the_mount() {
+        let mut server = Server::new_async().await;
+        // If the client resolved "%2e%2e" as "..", this is where it would land
+        let escaped = server
+            .mock("DELETE", "/v1/sys/policies/acl/admin")
+            .expect(0)
+            .create_async()
+            .await;
+        let contained = server
+            .mock(
+                "DELETE",
+                "/v1/secret/metadata/%252e%252e/%252e%252e/sys/policies/acl/admin",
+            )
+            .with_status(204)
+            .create_async()
+            .await;
+
+        engine(&server)
+            .delete("/%2e%2e/%2e%2e/sys/policies/acl/admin")
+            .await
+            .unwrap();
+
+        escaped.assert_async().await;
+        contained.assert_async().await;
     }
 }
