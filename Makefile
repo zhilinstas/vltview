@@ -16,6 +16,8 @@ BINARY_NAME := vltview
 CARGO := cargo
 # Detect docker compose command (new: docker compose, old: docker-compose)
 DOCKER_COMPOSE := $(shell which docker-compose 2>/dev/null || echo "docker compose")
+# The one-off container that runs vault-init.sh (container_name in docker-compose.yml)
+SEED_CONTAINER := vltview-vault-init
 
 help: ## Show this help message
 	@echo "$(BLUE)╔═══════════════════════════════════════════════════════════════╗$(NC)"
@@ -63,14 +65,14 @@ run-debug: ## Run with debug logging
 	 export VAULT_TOKEN='test-token' && \
 	 RUST_LOG=debug $(CARGO) run -- --debug
 
-run-with-docker: ## Run with Docker Vault (starts docker-compose first)
-	@echo "$(BLUE)Starting Vault with Docker Compose...$(NC)"
+# The path is inside the KV mount `secret/`, which the app adds itself:
+# /myapp is secret/myapp in Vault
+run-with-docker: ## Start the Docker Vault, then run against it in the sample folder /myapp
 	@$(MAKE) docker-up
-	@sleep 5
 	@echo "$(BLUE)Running $(PROJECT_NAME)...$(NC)"
 	@export VAULT_ADDR='http://localhost:8200' && \
 	 export VAULT_TOKEN='root' && \
-	 $(CARGO) run -- /secret/myapp
+	 $(CARGO) run -- /myapp
 
 dev: ## Run in development mode with cargo watch
 	@echo "$(BLUE)Starting development mode...$(NC)"
@@ -104,12 +106,19 @@ test-coverage: ## Generate test coverage report (requires cargo-tarpaulin)
 
 ##@ Docker
 
-docker-up: ## Start Vault with Docker Compose
+# `up -d` returns as soon as the seed container has started, so wait for it to
+# exit and fail if it did not exit with 0
+docker-up: ## Start the dev Vault and fill it with sample secrets and policies
 	@echo "$(BLUE)Starting Vault with Docker Compose...$(NC)"
 	$(DOCKER_COMPOSE) up -d
-	@echo "$(YELLOW)Waiting for Vault to initialize...$(NC)"
-	@sleep 3
-	@echo "$(GREEN)✓ Vault is ready at http://localhost:8200$(NC)"
+	@echo "$(YELLOW)Waiting for the sample data (vault-init.sh)...$(NC)"
+	@status=$$(docker wait $(SEED_CONTAINER)); \
+	 if [ "$$status" != "0" ]; then \
+	   $(DOCKER_COMPOSE) logs --tail=20 vault-init; \
+	   echo "$(RED)✗ Seeding Vault failed (exit status $$status)$(NC)"; \
+	   exit 1; \
+	 fi
+	@echo "$(GREEN)✓ Vault is ready at http://localhost:8200 with the sample data$(NC)"
 	@echo "$(GREEN)  Token: root$(NC)"
 
 docker-down: ## Stop Docker Compose services

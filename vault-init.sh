@@ -1,55 +1,73 @@
-#!/bin/bash
+#!/bin/sh
+# Fills a dev Vault with sample secrets and policies.
+#
+# docker-compose runs this inside the Vault image, which has only a POSIX
+# shell (busybox ash) and no bash. Keep it to POSIX sh: no `echo -e`, no
+# `&>`, no `{1..30}`, no arrays, no `[[ ]]`.
+# Check a change with: sh -n vault-init.sh && shellcheck -s sh vault-init.sh
 set -e
 
-# Colors for output
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m' # No Color
+# Colors for output. The variables hold the escape character itself, so a
+# plain `echo` prints them the same way in every shell.
+ESC=$(printf '\033')
+GREEN="${ESC}[0;32m"
+BLUE="${ESC}[0;34m"
+YELLOW="${ESC}[1;33m"
+RED="${ESC}[0;31m"
+NC="${ESC}[0m" # No Color
 
-echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║           HashiCorp Vault - Initialization Script            ║${NC}"
-echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════╝${NC}"
+echo "${BLUE}╔═══════════════════════════════════════════════════════════════╗${NC}"
+echo "${BLUE}║           HashiCorp Vault - Initialization Script            ║${NC}"
+echo "${BLUE}╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
 # Check if vault CLI is available
-if ! command -v vault &> /dev/null; then
-    echo -e "${RED}✗ Vault CLI not found!${NC}"
+if ! command -v vault > /dev/null 2>&1; then
+    echo "${RED}✗ Vault CLI not found!${NC}"
     echo "Please install vault or run this script inside the vault container"
     exit 1
 fi
 
-# Default values
+# Default values, exported so that the vault CLI below uses them too
 VAULT_ADDR=${VAULT_ADDR:-"http://127.0.0.1:8200"}
 VAULT_TOKEN=${VAULT_TOKEN:-"root"}
+export VAULT_ADDR VAULT_TOKEN
 
-echo -e "${BLUE}ℹ${NC} Vault Address: $VAULT_ADDR"
-echo -e "${BLUE}ℹ${NC} Vault Token: $VAULT_TOKEN"
+echo "${BLUE}ℹ${NC} Vault Address: $VAULT_ADDR"
+echo "${BLUE}ℹ${NC} Vault Token: $VAULT_TOKEN"
 echo ""
 
 # Wait for Vault to be ready
-echo -e "${YELLOW}⏳${NC} Waiting for Vault to be ready..."
-for i in {1..30}; do
-    if vault status &> /dev/null; then
-        echo -e "${GREEN}✓${NC} Vault is ready!"
-        break
-    fi
-    if [ $i -eq 30 ]; then
-        echo -e "${RED}✗ Timeout waiting for Vault${NC}"
+echo "${YELLOW}⏳${NC} Waiting for Vault to be ready..."
+i=1
+while ! vault status > /dev/null 2>&1; do
+    if [ "$i" -ge 30 ]; then
+        echo "${RED}✗ Timeout waiting for Vault${NC}"
         exit 1
     fi
+    i=$((i + 1))
     sleep 1
 done
+echo "${GREEN}✓${NC} Vault is ready!"
 echo ""
 
-echo -e "${BLUE}📝 Creating test secrets...${NC}"
+# `docker compose up` runs this script again every time it is called. Write
+# the sample data only into a Vault that does not have it yet: every `kv put`
+# below adds a new version, so a second run would put the sample values on top
+# of whatever was edited in the meantime.
+if vault kv metadata get secret/myapp/database > /dev/null 2>&1; then
+    echo "${GREEN}✓${NC} The sample data is already there, nothing to do."
+    echo "  To start again from the sample data: make docker-down && make docker-up"
+    exit 0
+fi
+
+echo "${BLUE}📝 Creating test secrets...${NC}"
 echo ""
 
 # ============================================
 # Application Secrets
 # ============================================
-echo -e "${YELLOW}Creating application secrets...${NC}"
+echo "${YELLOW}Creating application secrets...${NC}"
 
 vault kv put secret/myapp/database \
     password=secret123 \
@@ -89,12 +107,12 @@ vault kv put secret/myapp/oauth \
     redirect_uri=https://myapp.example.com/callback \
     scope="read write"
 
-echo -e "${GREEN}✓${NC} Created secret/myapp/*"
+echo "${GREEN}✓${NC} Created secret/myapp/*"
 
 # ============================================
 # Production Secrets
 # ============================================
-echo -e "${YELLOW}Creating production secrets...${NC}"
+echo "${YELLOW}Creating production secrets...${NC}"
 
 vault kv put secret/prod/database \
     password=prod-secret-pass-super-secure \
@@ -122,12 +140,12 @@ vault kv put secret/prod/stripe \
     webhook_secret=whsec_prod_webhook \
     publishable_key=pk_live_prod_key
 
-echo -e "${GREEN}✓${NC} Created secret/prod/*"
+echo "${GREEN}✓${NC} Created secret/prod/*"
 
 # ============================================
 # Staging Secrets
 # ============================================
-echo -e "${YELLOW}Creating staging secrets...${NC}"
+echo "${YELLOW}Creating staging secrets...${NC}"
 
 vault kv put secret/staging/database \
     password=staging-pass \
@@ -142,12 +160,12 @@ vault kv put secret/staging/api \
     endpoint=https://api.staging.example.com \
     version=v2
 
-echo -e "${GREEN}✓${NC} Created secret/staging/*"
+echo "${GREEN}✓${NC} Created secret/staging/*"
 
 # ============================================
 # Test Secrets
 # ============================================
-echo -e "${YELLOW}Creating test secrets...${NC}"
+echo "${YELLOW}Creating test secrets...${NC}"
 
 vault kv put secret/test/credentials \
     username=testuser \
@@ -170,7 +188,7 @@ vault kv put secret/test/database \
 # ============================================
 # Multiline Test Secrets (for textarea testing)
 # ============================================
-echo -e "${YELLOW}Creating multiline test secrets...${NC}"
+echo "${YELLOW}Creating multiline test secrets...${NC}"
 
 # SSH Private Key
 vault kv put secret/test/ssh-key \
@@ -301,6 +319,8 @@ if __name__ == "__main__":
     print(json.dumps(result, indent=2))'
 
 # SQL Migration
+# The $2a$10$... below is sample data, meant to stay as it is written
+# shellcheck disable=SC2016
 vault kv put secret/test/sql-migration \
     version="001" \
     up_sql='-- Migration: Add user authentication
@@ -329,12 +349,12 @@ DROP INDEX IF EXISTS idx_users_email;
 DROP INDEX IF EXISTS idx_users_username;
 DROP TABLE IF EXISTS users;'
 
-echo -e "${GREEN}✓${NC} Created secret/test/* (including multiline examples)"
+echo "${GREEN}✓${NC} Created secret/test/* (including multiline examples)"
 
 # ============================================
 # Development Secrets
 # ============================================
-echo -e "${YELLOW}Creating development secrets...${NC}"
+echo "${YELLOW}Creating development secrets...${NC}"
 
 vault kv put secret/dev/database \
     password=devpass \
@@ -359,12 +379,12 @@ vault kv put secret/dev/slack \
     channel=#dev-notifications \
     username=devbot
 
-echo -e "${GREEN}✓${NC} Created secret/dev/*"
+echo "${GREEN}✓${NC} Created secret/dev/*"
 
 # ============================================
 # Nested Company Structure
 # ============================================
-echo -e "${YELLOW}Creating company secrets...${NC}"
+echo "${YELLOW}Creating company secrets...${NC}"
 
 vault kv put secret/company/hr/payroll \
     system=workday \
@@ -408,12 +428,12 @@ vault kv put secret/company/sales/salesforce \
     password=salesforce-pass \
     security_token=salesforce-token
 
-echo -e "${GREEN}✓${NC} Created secret/company/*"
+echo "${GREEN}✓${NC} Created secret/company/*"
 
 # ============================================
 # Multi-level Nested Secrets
 # ============================================
-echo -e "${YELLOW}Creating deeply nested secrets...${NC}"
+echo "${YELLOW}Creating deeply nested secrets...${NC}"
 
 vault kv put secret/services/backend/auth-service \
     database_url=postgresql://auth:pass@db:5432/auth \
@@ -435,10 +455,10 @@ vault kv put secret/services/frontend/mobile-app \
     app_id=com.example.mobile \
     push_key=mobile-push-key
 
-echo -e "${GREEN}✓${NC} Created secret/services/*"
+echo "${GREEN}✓${NC} Created secret/services/*"
 
 echo ""
-echo -e "${BLUE}🔐 Creating test policies...${NC}"
+echo "${BLUE}🔐 Creating test policies...${NC}"
 echo ""
 
 # ============================================
@@ -460,7 +480,7 @@ path "sys/policies/acl" {
 }
 EOF
 
-echo -e "${GREEN}✓${NC} Created readonly-policy"
+echo "${GREEN}✓${NC} Created readonly-policy"
 
 # ============================================
 # Admin Policy
@@ -486,7 +506,7 @@ path "sys/capabilities-self" {
 }
 EOF
 
-echo -e "${GREEN}✓${NC} Created admin-policy"
+echo "${GREEN}✓${NC} Created admin-policy"
 
 # ============================================
 # Developer Policy
@@ -516,7 +536,7 @@ path "secret/data/staging/*" {
 }
 EOF
 
-echo -e "${GREEN}✓${NC} Created dev-policy"
+echo "${GREEN}✓${NC} Created dev-policy"
 
 # ============================================
 # Production Read-Only Policy
@@ -532,7 +552,7 @@ path "secret/metadata/prod/*" {
 }
 EOF
 
-echo -e "${GREEN}✓${NC} Created prod-readonly-policy"
+echo "${GREEN}✓${NC} Created prod-readonly-policy"
 
 # ============================================
 # App-Specific Policy
@@ -553,15 +573,15 @@ path "secret/data/services/*" {
 }
 EOF
 
-echo -e "${GREEN}✓${NC} Created myapp-policy"
+echo "${GREEN}✓${NC} Created myapp-policy"
 
 echo ""
-echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║                  ✅ Initialization Complete!                  ║${NC}"
-echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════╝${NC}"
+echo "${BLUE}╔═══════════════════════════════════════════════════════════════╗${NC}"
+echo "${BLUE}║                  ✅ Initialization Complete!                  ║${NC}"
+echo "${BLUE}╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-echo -e "${GREEN}📊 Created Secrets:${NC}"
+echo "${GREEN}📊 Created Secrets:${NC}"
 echo "  ├── /secret/myapp/*         (5 secrets)"
 echo "  ├── /secret/prod/*          (4 secrets)"
 echo "  ├── /secret/staging/*       (2 secrets)"
@@ -570,7 +590,7 @@ echo "  ├── /secret/dev/*           (4 secrets)"
 echo "  ├── /secret/company/*       (8 secrets in nested structure)"
 echo "  └── /secret/services/*      (4 secrets in nested structure)"
 echo ""
-echo -e "${YELLOW}📝 Multiline Examples in /secret/test/*:${NC}"
+echo "${YELLOW}📝 Multiline Examples in /secret/test/*:${NC}"
 echo "  ├── ssh-key          (SSH private key)"
 echo "  ├── json-config      (JSON configuration)"
 echo "  ├── yaml-config      (YAML configuration)"
@@ -580,7 +600,7 @@ echo "  ├── python-script    (Python code)"
 echo "  └── sql-migration    (SQL up/down migration)"
 echo ""
 
-echo -e "${GREEN}🔐 Created Policies:${NC}"
+echo "${GREEN}🔐 Created Policies:${NC}"
 echo "  ├── readonly-policy"
 echo "  ├── admin-policy"
 echo "  ├── dev-policy"
@@ -588,7 +608,7 @@ echo "  ├── prod-readonly-policy"
 echo "  └── myapp-policy"
 echo ""
 
-echo -e "${GREEN}📝 Quick Commands:${NC}"
+echo "${GREEN}📝 Quick Commands:${NC}"
 echo "  # List all secrets"
 echo "  vault kv list secret/"
 echo ""
@@ -602,10 +622,10 @@ echo "  # List nested path"
 echo "  vault kv list secret/company/"
 echo ""
 
-echo -e "${BLUE}🚀 Test VltView:${NC}"
+echo "${BLUE}🚀 Test VltView:${NC}"
 echo "  export VAULT_ADDR='$VAULT_ADDR'"
 echo "  export VAULT_TOKEN='$VAULT_TOKEN'"
-echo "  cargo run -- /secret/myapp"
+echo "  cargo run -- /myapp"
 echo ""
 
-echo -e "${GREEN}✨ Happy testing!${NC}"
+echo "${GREEN}✨ Happy testing!${NC}"

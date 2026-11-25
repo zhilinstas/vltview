@@ -55,7 +55,7 @@ case $MODE in
         echo ""
         echo "  export VAULT_ADDR='http://localhost:8200'"
         echo "  export VAULT_TOKEN='root'"
-        echo "  cargo run -- /secret/myapp"
+        echo "  cargo run -- /myapp"
         echo ""
         echo -e "${YELLOW}Or run this script again:${NC}"
         echo "  ./docker-test.sh run"

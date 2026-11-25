@@ -28,7 +28,7 @@ make check              # Check compilation without building
 ```bash
 make run                # Run with fake credentials (VAULT_ADDR=localhost:8200, VAULT_TOKEN=test-token)
 make run-debug          # Run with debug logging
-make run-with-docker    # Start docker-compose and run
+make run-with-docker    # make docker-up, then run in the sample folder /myapp (token: root)
 make dev                # Development mode with cargo watch
 ```
 
@@ -50,10 +50,11 @@ make pre-commit    # Full pre-commit check (fmt, clippy, test, build)
 
 ### Docker Environment
 ```bash
-make docker-up        # Start Vault dev server (token: root)
-make docker-down      # Stop Docker services
-make docker-logs      # View Vault logs
-make docker-clean     # Remove containers and volumes
+make docker-up        # Start Vault dev server (token: root), seed the sample data, wait for the seed step
+make docker-down      # Stop and remove the containers (the data is in memory and goes with them)
+make docker-logs      # Follow the logs of both containers
+make docker-logs-init # Output of the seed step
+make docker-clean     # docker-down, plus volumes
 ```
 
 ## Architecture
@@ -328,26 +329,26 @@ tracing::error!("Operation failed: {}", error);
 
 ## Testing with Vault Dev Server
 
-The project includes a complete Docker-based development environment:
+The Docker dev environment works from a fresh clone; nothing has to be run by hand after it:
 
 ```bash
-# Start Vault dev server and initialize with test data
-make docker-up
-./vault-init.sh   # Optional: populate with sample secrets/policies
-
-# The vault-init.sh script creates:
-# - Sample secrets at various paths (secret/myapp/*, secret/test/*)
-# - Test policies (admin, readonly, etc.)
-# - Nested directory structures for testing navigation
-
-# Vault dev server credentials:
-# - Address: http://localhost:8200
-# - Token: root
+make docker-up          # Vault at http://localhost:8200, token root, with the sample data
+make run-with-docker    # the same, then: cargo run -- /myapp
 ```
 
-The docker-compose.yml runs:
-1. `vault` service: HashiCorp Vault in dev mode
-2. `vault-init` service: One-time initialization container
+`docker-compose.yml` runs two services:
+1. `vault` (container `vltview-vault`): HashiCorp Vault in dev mode. Everything is in memory, so removing the container (`make docker-down`) discards the data
+2. `vault-init` (container `vltview-vault-init`): runs `vault-init.sh` and exits. `make docker-up` waits for it and fails if its exit status is not 0. Compose runs it again on every `make docker-up`; the script does nothing when the sample data is already there, so edits made in a running Vault are kept. For a fresh start: `make docker-down && make docker-up`
+
+`vault-init.sh` creates:
+- Sample secrets under `secret/`: `myapp`, `prod`, `staging`, `dev`, `test` (with multi-line values), and the nested `company` and `services`
+- Five policies: `admin-policy`, `readonly-policy`, `dev-policy`, `prod-readonly-policy`, `myapp-policy`
+
+Rules for this environment:
+- `vault-init.sh` runs inside the Vault image, which has no bash, only busybox `sh`. Keep the script POSIX: check with `sh -n vault-init.sh` and `shellcheck -s sh vault-init.sh`, then run `make docker-up`
+- The path given to the app is inside the KV mount: `/myapp` is `secret/myapp` in Vault. `/secret/myapp` would be `secret/secret/myapp`, which does not exist
+- The container names are fixed, so only one checkout can run the environment at a time. Stop it with `make docker-down` in the checkout that started it
+- `./docker-build.sh` builds a release binary in Ubuntu 20.04 from `Dockerfile.compat` (for older glibc) and writes it to `target/vltview`
 
 ## Async Operation Pattern
 

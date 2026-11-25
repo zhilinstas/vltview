@@ -229,16 +229,38 @@ vltview --debug
 
 ### Docker Development Environment
 
+Needs Docker with Compose and `make`. From a fresh clone:
+
 ```bash
-# Start Vault dev server
-docker-compose up -d
-
-# Initialize Vault with test data
-./vault-init.sh
-
-# Run vltview
-cargo run
+make docker-up          # start a dev Vault and fill it with sample data
+make run-with-docker    # the same, then run vltview in the sample folder /myapp
+make docker-down        # stop and remove the containers
 ```
+
+`make docker-up` starts Vault in dev mode at `http://localhost:8200` (token
+`root`) and then runs `vault-init.sh` in a second container, which writes the
+sample secrets (`myapp`, `prod`, `staging`, `test`, `dev`, `company`,
+`services`) and five policies. The target waits for that step and fails if it
+fails; `make docker-logs-init` shows its output.
+
+The dev server keeps everything in memory. `make docker-down` discards the
+data, and the next `make docker-up` writes the sample data again. While Vault
+is running, `make docker-up` leaves what is in it alone.
+
+To run against it yourself:
+
+```bash
+export VAULT_ADDR=http://localhost:8200
+export VAULT_TOKEN=root
+cargo run -- /myapp
+```
+
+The path is relative to the KV mount `secret/`, which vltview adds itself:
+`/myapp` is `secret/myapp` in Vault.
+
+`./docker-build.sh` builds a release binary inside Ubuntu 20.04
+(`Dockerfile.compat`) for machines with an older glibc and writes it to
+`target/vltview`.
 
 ## License
 
