@@ -189,7 +189,8 @@ const SECRET: &[Binding] = &[
     ),
     bind("Space", "peek", "Reveal or hide the selected value", 1),
     bind("v", "show all", "Reveal or hide every value", 2),
-    bind("c", "copy", "Copy the selected value (also y)", 1),
+    bind("c", "copy", "Copy the selected value", 1),
+    bind("y", "copy", "The same as c", 0),
     bind("e", "edit", "Edit the secret", 1),
     bind("l", "history", "Show the version history", 2),
     bind("Esc", "list", "Go back to the list", 5),
@@ -210,19 +211,22 @@ const VERSIONS: &[Binding] = &[
 const VALUE_VIEWER: &[Binding] = &[
     bind("j/k ↑/↓", "scroll", "Scroll", 1),
     bind("PgUp/PgDn g/G", "page", "Page up / down, top / bottom", 0),
-    bind("c", "copy", "Copy the value (also y)", 1),
-    bind("Esc", "close", "Close (also Enter, q)", 1),
+    bind("c", "copy", "Copy the value", 1),
+    bind("y", "copy", "The same as c", 0),
+    bind("Esc", "close", "Close", 1),
+    bind("Enter/q", "close", "The same as Esc", 0),
 ];
 
 const EDIT: &[Binding] = &[
     bind("j/k ↑/↓", "move", "Move between fields", 0),
     bind("PgUp/PgDn g/G", "page", "Page up / down, first / last", 0),
-    bind("Enter", "edit", "Edit the selected value (also e)", 1),
-    bind("r", "rename", "Rename the selected key", 3),
+    bind("Enter", "edit", "Edit the selected value", 1),
+    bind("e", "edit", "The same as Enter", 0),
+    bind("r", "rename", "Rename the selected key", 4),
     bind("a", "add", "Add a field", 2),
     bind("d", "delete", "Delete the selected field", 3),
-    bind("Space", "peek", "Reveal or hide the selected value", 5),
-    bind("v", "show all", "Reveal or hide every value", 6),
+    bind("Space", "peek", "Reveal or hide the selected value", 2),
+    bind("v", "show all", "Reveal or hide every value", 2),
     bind("Ctrl+s", "save", "Save the secret to Vault", 1),
     bind(
         "Esc",
@@ -230,7 +234,7 @@ const EDIT: &[Binding] = &[
         "Close the editor (asks if there are changes)",
         1,
     ),
-    bind("Tab", "pane", "Switch to the list; the edit stays open", 4),
+    bind("Tab", "pane", "Switch to the list; the edit stays open", 5),
     bind("h ←", "list", "Focus the list; the edit stays open", 0),
     bind("?", "help", "Show this help", 0),
 ];
@@ -242,12 +246,8 @@ const EDIT_FIELD: &[Binding] = &[
         "Keep the text (from a key, moves on to its value)",
         1,
     ),
-    bind(
-        "Alt+Enter",
-        "new line",
-        "Insert a line break in a value (also Ctrl+j)",
-        3,
-    ),
+    bind("Alt+Enter", "new line", "Insert a line break in a value", 3),
+    bind("Ctrl+j", "new line", "The same as Alt+Enter", 0),
     bind(
         "Tab",
         "key/value",
@@ -288,13 +288,14 @@ const QUIT_CONFIRM: &[Binding] = &[
     bind("n/Esc", "stay", "Go back to where you were", 1),
 ];
 
-const NOTICE: &[Binding] = &[bind("Esc", "close", "Close the message (also Enter)", 1)];
+const NOTICE: &[Binding] = &[bind("Esc/Enter", "close", "Close the message", 1)];
 
 const LOAD_ERROR: &[Binding] = &[bind("Esc", "dismiss", "Dismiss the error", 1)];
 
 const HELP: &[Binding] = &[
     bind("j/k ↑/↓", "scroll", "Scroll", 1),
     bind("PgUp/PgDn g/G", "page", "Page up / down, top / bottom", 0),
+    bind("Space", "page", "The same as PgDn", 0),
     bind("Esc/?/q", "close", "Close the help", 1),
 ];
 
@@ -328,7 +329,8 @@ const LOGS: &[Binding] = &[
     ),
     bind("a", "follow", "Follow new entries", 1),
     bind("c", "clear", "Clear the log", 1),
-    bind("Esc", "close", "Back to the main screen (also ~)", 1),
+    bind("Esc", "close", "Back to the main screen", 1),
+    bind("~", "close", "The same as Esc", 0),
     bind("q", "quit", "Quit", 2),
 ];
 

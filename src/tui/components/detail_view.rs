@@ -10,7 +10,7 @@ use ratatui::{
 use std::collections::HashSet;
 
 use crate::app::secret::{display_value, masked};
-use crate::tui::action::{Action, FocusedPane};
+use crate::tui::action::{Action, FocusedPane, VersionUse};
 use crate::tui::component::Component;
 use crate::tui::components::popup::{
     border_color, display_width, selection_style, truncate, visibility, wrap,
@@ -93,8 +93,9 @@ pub struct DetailViewComponent {
     /// The current (latest) version number in Vault
     current_version: Option<u64>,
 
-    /// Version that was asked for, to view or to edit, and has not arrived
-    awaited_version: Option<u64>,
+    /// The version that was asked for last and has not arrived, and what
+    /// for
+    awaited_version: Option<(u64, VersionUse)>,
 
     /// Value being shown in full, if any
     viewer: Option<ValueViewer>,
@@ -231,12 +232,14 @@ impl DetailViewComponent {
 
     /// A version that was asked for has arrived, or could not be loaded.
     ///
-    /// Returns whether it is still the one awaited, and stops waiting for
-    /// it. A version asked for before the user picked another one is not:
-    /// requests are not cancelled, so their results can arrive in any order.
-    pub fn version_arrived(&mut self, version: u64) -> bool {
+    /// Returns whether it is still the one awaited, for that use, and stops
+    /// waiting for it. A version asked for before the user picked another
+    /// one is not, and neither is a version asked for to view once the user
+    /// has asked to edit it: requests are not cancelled, so their results
+    /// can arrive in any order.
+    pub fn version_arrived(&mut self, version: u64, wanted_for: VersionUse) -> bool {
         self.awaited_version
-            .take_if(|awaited| *awaited == version)
+            .take_if(|awaited| *awaited == (version, wanted_for))
             .is_some()
     }
 
@@ -734,7 +737,7 @@ impl Component for DetailViewComponent {
                 // View selected version
                 (KeyCode::Enter, KeyModifiers::NONE) => {
                     let version = self.selected_version();
-                    self.awaited_version = version;
+                    self.awaited_version = version.map(|v| (v, VersionUse::View));
                     version.map(|version| Action::ViewSecretVersion {
                         path: self.path.clone(),
                         version,
@@ -744,7 +747,7 @@ impl Component for DetailViewComponent {
                 // Create new version from selected
                 (KeyCode::Char('n'), KeyModifiers::NONE) => {
                     let version = self.selected_version();
-                    self.awaited_version = version;
+                    self.awaited_version = version.map(|v| (v, VersionUse::Edit));
                     version.map(|version| Action::CreateFromVersion {
                         path: self.path.clone(),
                         version,

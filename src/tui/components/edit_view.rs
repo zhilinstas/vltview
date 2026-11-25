@@ -16,6 +16,7 @@ use crate::tui::components::popup::{
     border_color, centered, display_width, selection_style, truncate, visibility, wrap_words,
 };
 use crate::tui::context::{ComponentContext, RenderContext};
+use crate::tui::keymap::{self, Context};
 use crate::vault::{SecretData, WriteMode};
 
 /// Widest the key column gets, in columns
@@ -93,6 +94,11 @@ pub struct EditViewComponent {
     /// Whether there are unsaved changes
     has_changes: bool,
 
+    /// Whether a save has been sent and not answered yet. The editor takes
+    /// no changes meanwhile: the answer closes it, and anything typed in
+    /// between would be dropped unsaved.
+    saving: bool,
+
     /// Whether every value is shown in the list. Values are masked there as
     /// in the secret view; the one being typed is in clear in its text box.
     show_values: bool,
@@ -134,6 +140,7 @@ impl EditViewComponent {
             value_textarea: styled_textarea(Vec::new()),
             is_new: false,
             has_changes: false,
+            saving: false,
             show_values: false,
             error: None,
             delete_confirmation: None,
@@ -200,7 +207,8 @@ impl EditViewComponent {
     pub fn secret_data(&self) -> Result<SecretData, String> {
         let mut data = SecretData::new();
         for (row, field) in self.fields.iter().enumerate() {
-            if field.key.is_empty() {
+            // A key of nothing but spaces is no key either
+            if field.key.trim().is_empty() {
                 if field.text.is_empty() {
                     continue;
                 }
@@ -248,8 +256,10 @@ impl EditViewComponent {
         self.mode != EditMode::Navigate
     }
 
-    /// Set error message
+    /// Show an error. It is how a failed save comes back, so the editor
+    /// takes changes again.
     pub fn set_error(&mut self, error: Option<String>) {
+        self.saving = false;
         self.error = error;
     }
 
@@ -438,16 +448,19 @@ impl EditViewComponent {
         });
 
         match data {
-            Ok(data) => Some(Action::SaveSecret {
-                path: self.path.clone(),
-                data,
-                // A new secret must not replace one that is already there
-                mode: if self.is_new {
-                    WriteMode::Create
-                } else {
-                    WriteMode::Update
-                },
-            }),
+            Ok(data) => {
+                self.saving = true;
+                Some(Action::SaveSecret {
+                    path: self.path.clone(),
+                    data,
+                    // A new secret must not replace one that is already there
+                    mode: if self.is_new {
+                        WriteMode::Create
+                    } else {
+                        WriteMode::Update
+                    },
+                })
+            }
             Err(message) => {
                 self.error = Some(message);
                 None
@@ -549,10 +562,6 @@ impl EditViewComponent {
             truncate(field_name, inner_width)
         };
 
-        let key_style = Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
-
         let text = vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -566,12 +575,8 @@ impl EditViewComponent {
                 "Takes effect when the secret is saved.",
                 Style::default().fg(Color::Gray),
             )),
-            Line::from(vec![
-                Span::styled("y", key_style),
-                Span::raw(" delete   "),
-                Span::styled("n/Esc", key_style),
-                Span::raw(" cancel"),
-            ]),
+            // The keys that answer it, from the key table like every hint
+            keymap::footer_line(&[Context::FieldDeleteConfirm], inner_width as u16),
         ];
 
         let block = Block::default()
@@ -601,6 +606,11 @@ impl Component for EditViewComponent {
                 }
                 _ => {}
             }
+            return Ok(None);
+        }
+
+        // Sent to Vault and not answered yet: nothing can be changed
+        if self.saving {
             return Ok(None);
         }
 
@@ -774,7 +784,14 @@ impl Component for EditViewComponent {
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )];
-        if self.has_changes {
+        if self.saving {
+            title.push(Span::styled(
+                "saving… ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else if self.has_changes {
             title.push(Span::styled(
                 "● unsaved ",
                 Style::default()
@@ -1607,5 +1624,17 @@ mod tests {
         assert!(!screen.contains("saving"), "{screen}");
         assert_shown_whole(&screen, "Copy of v1234567");
         assert!(screen.contains("host"), "{screen}");
+    }
+
+    #[test]
+    fn a_key_of_spaces_is_no_key() {
+        with_ctx(|ctx| {
+            let mut view = editor(json!({"host": "db"}));
+            add(&mut view, ctx, "  ", "orphan");
+
+            let action = view.handle_key(ctrl('s'), ctx).unwrap();
+            assert!(action.is_none(), "nothing may be sent: {action:?}");
+            assert!(rendered(&mut view, 52, 22).contains("has a value but no key"));
+        });
     }
 }

@@ -38,12 +38,6 @@ pub struct PolicyScreen {
     /// Scroll offset for policy content
     scroll_offset: usize,
 
-    /// Filter text (not yet implemented, placeholder for future)
-    filter: String,
-
-    /// Filtered policies (same as policies for now)
-    filtered_policies: Vec<String>,
-
     /// Loading state
     is_loading: bool,
 
@@ -77,8 +71,6 @@ impl PolicyScreen {
             current_policy_name: None,
             policy_content: None,
             scroll_offset: 0,
-            filter: String::new(),
-            filtered_policies: Vec::new(),
             is_loading: false,
             error: None,
             status: None,
@@ -96,9 +88,7 @@ impl PolicyScreen {
 
     /// Get selected policy name (in list mode)
     pub fn selected_policy(&self) -> Option<&str> {
-        self.filtered_policies
-            .get(self.selected_index)
-            .map(|s| s.as_str())
+        self.policies.get(self.selected_index).map(|s| s.as_str())
     }
 
     /// Move selection up (list mode)
@@ -110,7 +100,7 @@ impl PolicyScreen {
 
     /// Move selection down (list mode)
     fn move_down(&mut self) {
-        let max = self.filtered_policies.len().saturating_sub(1);
+        let max = self.policies.len().saturating_sub(1);
         if self.selected_index < max {
             self.selected_index += 1;
         }
@@ -153,20 +143,10 @@ impl PolicyScreen {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )]),
-            Line::from(vec![
-                Span::styled(
-                    format!("{} policies", self.filtered_policies.len()),
-                    Style::default().fg(Color::Gray),
-                ),
-                if !self.filter.is_empty() {
-                    Span::styled(
-                        format!(" (filtered: \"{}\")", self.filter),
-                        Style::default().fg(Color::Yellow),
-                    )
-                } else {
-                    Span::raw("")
-                },
-            ]),
+            Line::from(Span::styled(
+                format!("{} policies", self.policies.len()),
+                Style::default().fg(Color::Gray),
+            )),
         ])
         .block(Block::default().borders(Borders::ALL));
 
@@ -195,7 +175,7 @@ impl PolicyScreen {
             return;
         }
 
-        if self.filtered_policies.is_empty() {
+        if self.policies.is_empty() {
             let empty = Paragraph::new("No policies found")
                 .style(Style::default().fg(Color::Yellow))
                 .block(Block::default().borders(Borders::ALL).title("Policies"));
@@ -204,7 +184,7 @@ impl PolicyScreen {
         }
 
         let items: Vec<ListItem> = self
-            .filtered_policies
+            .policies
             .iter()
             .enumerate()
             .map(|(i, policy)| {
@@ -229,7 +209,7 @@ impl PolicyScreen {
 
         let mut block = Block::default()
             .borders(Borders::ALL)
-            .title(format!("Policies ({})", self.filtered_policies.len()));
+            .title(format!("Policies ({})", self.policies.len()));
         if let Some(name) = &self.awaited {
             block = block.title_bottom(Line::from(Span::styled(
                 format!(" {} loading {}… ", spinner_frame(), truncate(name, 40)),
@@ -503,7 +483,7 @@ impl PolicyScreen {
                 }
 
                 (KeyCode::PageDown, _) => {
-                    let last = self.filtered_policies.len().saturating_sub(1);
+                    let last = self.policies.len().saturating_sub(1);
                     self.selected_index = (self.selected_index + 10).min(last);
                     Ok(None)
                 }
@@ -516,7 +496,7 @@ impl PolicyScreen {
                     Ok(None)
                 }
                 (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
-                    self.selected_index = self.filtered_policies.len().saturating_sub(1);
+                    self.selected_index = self.policies.len().saturating_sub(1);
                     Ok(None)
                 }
 
@@ -544,14 +524,32 @@ impl PolicyScreen {
             }
         }
     }
+}
 
-    /// Apply an action
-    fn apply(&mut self, action: Action) -> Result<Option<Action>> {
+impl Component for PolicyScreen {
+    fn handle_key(&mut self, key: KeyEvent, _ctx: &ComponentContext) -> Result<Option<Action>> {
+        // A status line and an error stay until the next key
+        self.status = None;
+        self.notice = None;
+
+        if self.is_viewing_content() {
+            self.handle_content_key(key)
+        } else {
+            let selected_before = self.selected_index;
+            let result = self.handle_list_key(key);
+            // The cursor has left the policy that was asked for
+            if self.selected_index != selected_before {
+                self.awaited = None;
+            }
+            result
+        }
+    }
+
+    fn update(&mut self, action: Action, _ctx: &mut ComponentContext) -> Result<Option<Action>> {
         match action {
             // Policies loaded
             Action::PoliciesLoaded { policies } => {
-                self.policies = policies.clone();
-                self.filtered_policies = policies;
+                self.policies = policies;
                 self.selected_index = 0;
                 self.is_loading = false;
                 self.error = None;
@@ -630,30 +628,6 @@ impl PolicyScreen {
 
             _ => Ok(None),
         }
-    }
-}
-
-impl Component for PolicyScreen {
-    fn handle_key(&mut self, key: KeyEvent, _ctx: &ComponentContext) -> Result<Option<Action>> {
-        // A status line and an error stay until the next key
-        self.status = None;
-        self.notice = None;
-
-        if self.is_viewing_content() {
-            self.handle_content_key(key)
-        } else {
-            let selected_before = self.selected_index;
-            let result = self.handle_list_key(key);
-            // The cursor has left the policy that was asked for
-            if self.selected_index != selected_before {
-                self.awaited = None;
-            }
-            result
-        }
-    }
-
-    fn update(&mut self, action: Action, _ctx: &mut ComponentContext) -> Result<Option<Action>> {
-        self.apply(action)
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &RenderContext) {
@@ -828,7 +802,6 @@ mod tests {
     fn test_navigation() {
         let mut screen = PolicyScreen::new();
         screen.policies = vec!["p1".to_string(), "p2".to_string(), "p3".to_string()];
-        screen.filtered_policies = screen.policies.clone();
 
         assert_eq!(screen.selected_index, 0);
 

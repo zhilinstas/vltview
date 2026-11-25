@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::App;
 use crate::app::navigation::parent_path;
-use crate::tui::action::{Action, SelectionSource};
+use crate::tui::action::{Action, SelectionSource, VersionUse};
 use crate::tui::async_manager::AsyncManager;
 use crate::tui::component::Component;
 use crate::tui::components::{HelpOverlay, LogScreen, MainScreen, PolicyScreen};
@@ -90,6 +90,15 @@ pub struct Root {
     /// `None` when no secret is selected.
     latest_secret_request: Option<String>,
 
+    /// Number of the last load of a secret that was started. Two loads of
+    /// one path can be on their way at once (the preview, and the read
+    /// after a save); only the result of the later one is shown.
+    secret_load_seq: u64,
+
+    /// Screen `q` was pressed on while the main screen asks about unsaved
+    /// changes; the user is taken back there if they decline
+    asked_to_quit_from: Option<ActiveScreen>,
+
     /// Selected secret whose load is waiting for the cursor to rest, and
     /// when it is due
     pending_preview: Option<(String, Instant)>,
@@ -121,6 +130,8 @@ impl Root {
             should_quit: false,
             pending_clipboard: None,
             latest_secret_request: None,
+            secret_load_seq: 0,
+            asked_to_quit_from: None,
             pending_preview: None,
             last_selection_change: None,
             listing: None,
@@ -178,7 +189,17 @@ impl Root {
 
         // Route to active screen
         match self.active_screen {
-            ActiveScreen::Main => self.main_screen.handle_key(key, &ctx),
+            ActiveScreen::Main => {
+                let action = self.main_screen.handle_key(key, &ctx)?;
+                // The question about quitting was asked from another screen
+                // and has been answered "no": back to that screen
+                if !self.main_screen.captures_input()
+                    && let Some(screen) = self.asked_to_quit_from.take()
+                {
+                    self.active_screen = screen;
+                }
+                Ok(action)
+            }
             ActiveScreen::Logs => self.log_screen.handle_key(key, &ctx),
             ActiveScreen::Policy => self.policy_screen.handle_key(key, &ctx),
         }
@@ -446,7 +467,10 @@ impl Root {
                 if let Some(next) = self.main_screen.update(action, &mut ctx)? {
                     return self.process_action(next, app);
                 }
-                self.active_screen = ActiveScreen::Main;
+                if self.active_screen != ActiveScreen::Main {
+                    self.asked_to_quit_from = Some(self.active_screen);
+                    self.active_screen = ActiveScreen::Main;
+                }
             }
 
             Action::QuitNow => {
@@ -468,17 +492,14 @@ impl Root {
             }
 
             // A load that was overtaken by a newer request: drop it, so the
-            // content pane never shows a secret other than the last one asked for
-            Action::SecretLoaded { path, .. }
-                if self.latest_secret_request.as_deref() != Some(path.as_str()) =>
-            {
+            // content pane never shows a secret other than the last one
+            // asked for, nor an older read of it after a newer one
+            Action::SecretLoaded { request, path, .. } if !self.is_wanted(*request, path) => {
                 tracing::debug!("Ignoring stale secret load");
             }
 
             // A failed load that was overtaken is of no interest either
-            Action::SecretLoadFailed { path, .. }
-                if self.latest_secret_request.as_deref() != Some(path.as_str()) =>
-            {
+            Action::SecretLoadFailed { request, path, .. } if !self.is_wanted(*request, path) => {
                 tracing::debug!("Ignoring stale secret load failure");
             }
 
@@ -502,7 +523,6 @@ impl Root {
             | Action::CreateSecret { .. }
             | Action::ShowCreateSecretInput
             | Action::ShowDeleteConfirmation { .. }
-            | Action::HideConfirmation
             | Action::SetStatus { .. }
             | Action::SaveFailed { .. }
             | Action::DeleteFailed { .. }
@@ -560,10 +580,18 @@ impl Root {
     // ASYNC OPERATION SPAWNING
     // ═══════════════════════════════════════════════════════════════
 
+    /// Whether the result of secret load `request` for `path` is the one
+    /// to show: the latest load started, for the secret that is selected
+    fn is_wanted(&self, request: u64, path: &str) -> bool {
+        request == self.secret_load_seq && self.latest_secret_request.as_deref() == Some(path)
+    }
+
     /// Spawn async operation to load a secret
     fn spawn_load_secret(&mut self, app: &App, path: String) {
         let secret_service = app.secret_service().clone();
         let failed_path = path.clone();
+        self.secret_load_seq += 1;
+        let request = self.secret_load_seq;
 
         self.async_manager.spawn(
             async move {
@@ -595,12 +623,14 @@ impl Root {
                 });
 
                 Ok(Action::SecretLoaded {
+                    request,
                     path: path.clone(),
                     data,
                     metadata,
                 })
             },
             move |e| Action::SecretLoadFailed {
+                request,
                 message: format!("Could not load {failed_path}: {e}"),
                 path: failed_path.clone(),
             },
@@ -684,12 +714,12 @@ impl Root {
                             message: format!("Deleted: {}", path),
                         },
                         Action::Refresh,
-                        Action::HideConfirmation,
                     ],
                 })
             },
             move |e| Action::DeleteFailed {
-                message: format!("Could not delete {failed_path}: {e}"),
+                path: failed_path.clone(),
+                message: e.to_string(),
             },
         );
     }
@@ -784,6 +814,7 @@ impl Root {
                 message: format!("Could not load version {version} of {failed_path}: {e}"),
                 path: failed_path.clone(),
                 version,
+                wanted_for: VersionUse::View,
             },
         );
     }
@@ -808,6 +839,7 @@ impl Root {
                 message: format!("Could not load version {version} of {failed_path}: {e}"),
                 path: failed_path.clone(),
                 version,
+                wanted_for: VersionUse::Edit,
             },
         );
     }
@@ -890,6 +922,7 @@ mod tests {
 
     fn loaded(path: &str, field: &str) -> Action {
         Action::SecretLoaded {
+            request: 0,
             path: path.to_string(),
             data: serde_json::from_value(serde_json::json!({ field: "value" })).unwrap(),
             metadata: None,
@@ -906,9 +939,40 @@ mod tests {
 
     fn failed(path: &str) -> Action {
         Action::SecretLoadFailed {
+            request: 0,
             path: path.to_string(),
             message: format!("Failed to load secret: no access to {path}"),
         }
+    }
+
+    /// The action as the load that was started last would send it
+    fn stamped(root: &Root, action: Action) -> Action {
+        let request = root.secret_load_seq;
+        match action {
+            Action::SecretLoaded {
+                path,
+                data,
+                metadata,
+                ..
+            } => Action::SecretLoaded {
+                request,
+                path,
+                data,
+                metadata,
+            },
+            Action::SecretLoadFailed { path, message, .. } => Action::SecretLoadFailed {
+                request,
+                path,
+                message,
+            },
+            other => other,
+        }
+    }
+
+    /// Let the result of the load that was started last arrive
+    fn deliver(root: &mut Root, app: &mut App, result: Action) {
+        let result = stamped(root, result);
+        root.process_action(result, app).unwrap();
     }
 
     fn pending(root: &Root) -> Option<&str> {
@@ -948,10 +1012,8 @@ mod tests {
         root.process_action(view("/app/b"), &mut app).unwrap();
 
         // B's result arrives first, A's arrives late
-        root.process_action(loaded("/app/b", "field_b"), &mut app)
-            .unwrap();
-        root.process_action(loaded("/app/a", "field_a"), &mut app)
-            .unwrap();
+        deliver(&mut root, &mut app, loaded("/app/b", "field_b"));
+        deliver(&mut root, &mut app, loaded("/app/a", "field_a"));
 
         let text = screen_text(&mut root, &app);
         assert!(text.contains(" /app/b "), "{text}");
@@ -965,8 +1027,7 @@ mod tests {
         let mut root = test_root(&app);
 
         root.process_action(view("/app/a"), &mut app).unwrap();
-        root.process_action(loaded("/app/a", "field_a"), &mut app)
-            .unwrap();
+        deliver(&mut root, &mut app, loaded("/app/a", "field_a"));
 
         let text = screen_text(&mut root, &app);
         assert!(text.contains(" /app/a "), "{text}");
@@ -1055,8 +1116,7 @@ mod tests {
         assert_eq!(spawned(&root), 1, "only /a was ever read");
 
         // /a's result arrives after the cursor left: it is not shown
-        root.process_action(loaded("/a", "field_a"), &mut app)
-            .unwrap();
+        deliver(&mut root, &mut app, loaded("/a", "field_a"));
         assert!(!screen_text(&mut root, &app).contains("field_a"));
     }
 
@@ -1113,7 +1173,7 @@ mod tests {
         let mut root = test_root(&app);
 
         root.process_action(view("/a"), &mut app).unwrap();
-        root.process_action(failed("/a"), &mut app).unwrap();
+        deliver(&mut root, &mut app, failed("/a"));
 
         let text = screen_text(&mut root, &app);
         assert!(text.contains("no access to /a"), "{text}");
@@ -1133,7 +1193,7 @@ mod tests {
 
         root.process_action(view("/a"), &mut app).unwrap();
         root.process_action(view("/b"), &mut app).unwrap();
-        root.process_action(failed("/a"), &mut app).unwrap();
+        deliver(&mut root, &mut app, failed("/a"));
 
         let text = screen_text(&mut root, &app);
         assert!(!text.contains("no access"), "{text}");
@@ -1148,8 +1208,7 @@ mod tests {
         let mut root = test_root(&app);
 
         root.process_action(view("/a"), &mut app).unwrap();
-        root.process_action(loaded("/a", "field_a"), &mut app)
-            .unwrap();
+        deliver(&mut root, &mut app, loaded("/a", "field_a"));
         assert!(screen_text(&mut root, &app).contains("field_a"));
 
         let deleted = Action::SecretDeleted {
@@ -1450,8 +1509,7 @@ mod tests {
         let mut app = test_app_at("/", &["a", "b"]);
         let mut root = test_root(&app);
         root.process_action(view("/a"), &mut app).unwrap();
-        root.process_action(loaded("/a", "field_a"), &mut app)
-            .unwrap();
+        deliver(&mut root, &mut app, loaded("/a", "field_a"));
         let before = spawned(&root);
 
         root.process_action(saved("/a"), &mut app).unwrap();
@@ -1468,13 +1526,11 @@ mod tests {
         let mut app = test_app_at("/", &["a", "b"]);
         let mut root = test_root(&app);
         root.process_action(view("/a"), &mut app).unwrap();
-        root.process_action(loaded("/a", "field_a"), &mut app)
-            .unwrap();
+        deliver(&mut root, &mut app, loaded("/a", "field_a"));
 
         // The cursor moves on while the save is on its way
         root.process_action(view("/b"), &mut app).unwrap();
-        root.process_action(loaded("/b", "field_b"), &mut app)
-            .unwrap();
+        deliver(&mut root, &mut app, loaded("/b", "field_b"));
         let before = spawned(&root);
 
         root.process_action(saved("/a"), &mut app).unwrap();
@@ -1484,8 +1540,7 @@ mod tests {
         assert_eq!(root.latest_secret_request.as_deref(), Some("/b"));
         let listing = listed(listing(&root), "/", &["a", "b"]);
         root.process_action(listing, &mut app).unwrap();
-        root.process_action(loaded("/a", "field_a"), &mut app)
-            .unwrap();
+        deliver(&mut root, &mut app, loaded("/a", "field_a"));
 
         let text = screen_text(&mut root, &app);
         assert!(text.contains("field_b"), "{text}");
@@ -1506,7 +1561,8 @@ mod tests {
         root.process_action(policies, &mut app).unwrap();
 
         let failed = Action::DeleteFailed {
-            message: "Could not delete /a: permission denied".to_string(),
+            path: "/a".to_string(),
+            message: "permission denied".to_string(),
         };
         root.process_action(failed, &mut app).unwrap();
 
@@ -1540,7 +1596,7 @@ mod tests {
     async fn q_asks_before_losing_an_edit_and_ctrl_c_does_not() {
         let edit_with_a_change = |root: &mut Root, app: &mut App| {
             root.process_action(view("/a"), app).unwrap();
-            root.process_action(loaded("/a", "field_a"), app).unwrap();
+            deliver(root, app, loaded("/a", "field_a"));
             root.process_action(Action::EditSecret, app).unwrap();
             for c in ['a', 'k'] {
                 press(root, app, c);
@@ -1710,6 +1766,7 @@ mod tests {
             )])
             .collect();
         Action::SecretLoaded {
+            request: 0,
             path: path.to_string(),
             data: fields.into_iter().collect(),
             metadata: (versions > 0).then(|| SecretMetadata {
@@ -1744,7 +1801,7 @@ mod tests {
     }
 
     fn after(app: &mut App, mut root: Root, action: Action) -> Root {
-        root.process_action(action, app).unwrap();
+        deliver(&mut root, app, action);
         root
     }
 
@@ -1863,7 +1920,8 @@ mod tests {
             Context::Notice => {
                 let root = in_the_list(app);
                 let failed = Action::DeleteFailed {
-                    message: "Could not delete /app/s09: permission denied".to_string(),
+                    path: "/app/s09".to_string(),
+                    message: "permission denied".to_string(),
                 };
                 vec![after(app, root, failed)]
             }
@@ -1989,5 +2047,43 @@ mod tests {
                 assert!(root.should_quit(), "{context:?}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn declining_to_quit_returns_to_the_screen_q_was_pressed_on() {
+        let mut app = app_with_a_long_list();
+        let root = with_an_unsaved_change(&mut app);
+        let mut root = after(&mut app, root, Action::ShowLogScreen);
+
+        feed(&mut root, &mut app, &chars("q"));
+        assert!(screen_text(&mut root, &app).contains(" Unsaved changes "));
+
+        feed(&mut root, &mut app, &chars("n"));
+        assert!(!root.should_quit());
+        assert_eq!(root.active_screen, ActiveScreen::Logs);
+    }
+
+    #[tokio::test]
+    async fn an_older_read_of_the_selected_secret_does_not_replace_a_newer_one() {
+        // Regression: results were matched by path only. The preview of a
+        // secret and the read after saving it could arrive in either order,
+        // and the old content could end up on screen as if it were current.
+        let mut app = test_app();
+        let mut root = test_root(&app);
+
+        root.process_action(view("/a"), &mut app).unwrap();
+        let preview = stamped(&root, loaded("/a", "before_the_save"));
+        let reload = Action::ReloadSecret {
+            path: "/a".to_string(),
+        };
+        root.process_action(reload, &mut app).unwrap();
+        let after_save = stamped(&root, loaded("/a", "after_the_save"));
+
+        root.process_action(after_save, &mut app).unwrap();
+        root.process_action(preview, &mut app).unwrap();
+
+        let text = screen_text(&mut root, &app);
+        assert!(text.contains("after_the_save"), "{text}");
+        assert!(!text.contains("before_the_save"), "{text}");
     }
 }

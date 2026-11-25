@@ -1,8 +1,9 @@
 use crate::app::navigation::child_path;
-use crate::tui::action::{Action, FocusedPane};
+use crate::tui::action::{Action, FocusedPane, VersionUse};
 use crate::tui::component::Component;
 use crate::tui::components::popup::{
-    border_color, centered, display_width, spinner_frame, truncate, wrap, wrap_words,
+    border_color, dialog, dialog_text_width, display_width, spinner_frame, truncate, wrap,
+    wrap_words,
 };
 use crate::tui::components::{DetailViewComponent, EditViewComponent, NavigationPane};
 use crate::tui::context::{ComponentContext, RenderContext};
@@ -14,7 +15,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use ratatui_textarea::{Input, Key, TextArea};
 use std::collections::VecDeque;
@@ -393,16 +394,22 @@ impl MainScreen {
             // has to fit in the rest whole, or it is left out: an error cut
             // in the middle says nothing.
             let room = area.width.saturating_sub(label.len() as u16 + 8) as usize;
-            let hint = match &self.create_error {
+            let hint: Line = match &self.create_error {
                 Some(error) => error
                     .wordings()
                     .into_iter()
                     .map(|wording| format!(" {wording} "))
                     .find(|wording| display_width(wording) <= room)
-                    .map(|wording| Span::styled(wording, Style::default().fg(Color::Red))),
-                None => Some(" Enter create  Esc cancel ")
-                    .filter(|hint| hint.len() <= room)
-                    .map(|hint| Span::styled(hint, Style::default().fg(Color::Gray))),
+                    .map(|wording| Span::styled(wording, Style::default().fg(Color::Red)).into()),
+                None => {
+                    let mut keys = keymap::footer_line(
+                        &[Context::CreatePrompt],
+                        room.saturating_sub(2) as u16,
+                    );
+                    keys.spans.insert(0, Span::raw(" "));
+                    keys.spans.push(Span::raw(" "));
+                    Some(keys).filter(|keys| keys.width() <= room)
+                }
             }
             .unwrap_or_default();
             let hint_width = hint.width() as u16;
@@ -509,86 +516,51 @@ impl MainScreen {
         }
     }
 
-    /// Render an error message over the screen.
-    ///
-    /// The width is fixed and the message is wrapped, so all of it is on
-    /// screen whatever the terminal size.
+    /// Render an error message over the screen. The message is wrapped,
+    /// so all of it is on screen whatever the terminal size.
     fn render_notice(frame: &mut Frame, area: Rect, message: &str, waiting: usize) {
-        let width = 62;
-        let inner_width = (width.min(area.width) as usize).saturating_sub(4);
+        let body = wrap_words(message, dialog_text_width(area))
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
+            .collect();
+        let note = (waiting > 0).then(|| format!("{waiting} more"));
 
-        let mut text = vec![Line::from("")];
-        text.extend(
-            wrap_words(message, inner_width)
-                .into_iter()
-                .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White)))),
-        );
-        text.push(Line::from(""));
-        let mut close = vec![
-            Span::styled(
-                "Esc",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" close"),
-        ];
-        if waiting > 0 {
-            close.push(Span::styled(
-                format!("   {waiting} more"),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        text.push(Line::from(close));
-
-        let popup = centered(width, text.len() as u16 + 2, area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Red))
-            .title(Span::styled(
-                " Error ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ));
-
-        frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new(text)
-                .alignment(Alignment::Center)
-                .block(block),
-            popup,
+        dialog(
+            frame,
+            area,
+            "Error",
+            Color::Red,
+            body,
+            Context::Notice,
+            note,
         );
     }
 
-    /// Render the question about unsaved changes. Fixed size, like the
-    /// other dialogs, so all of it is on screen at 80x24.
+    /// The path a dialog is about, on at most three lines
+    fn path_lines(path: &str, area: Rect) -> Vec<Line<'static>> {
+        wrap(path, dialog_text_width(area))
+            .into_iter()
+            .take(3)
+            .map(|line| {
+                Line::from(Span::styled(
+                    line,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            })
+            .collect()
+    }
+
+    /// Render the question about unsaved changes
     fn render_discard_prompt(frame: &mut Frame, area: Rect, prompt: Discard, path: &str) {
-        let width = 62;
-        let inner_width = (width.min(area.width) as usize).saturating_sub(4);
-        let path_lines = wrap(path, inner_width);
-        let path_lines = &path_lines[..path_lines.len().min(3)];
-
-        let (consequence, yes, no) = match prompt {
-            Discard::CloseEditor => (
-                "Closing the editor loses them.",
-                " discard   ",
-                " keep editing",
-            ),
-            Discard::Quit => ("Quitting loses them.", " quit   ", " stay"),
+        let (consequence, keys) = match prompt {
+            Discard::CloseEditor => ("Closing the editor loses them.", Context::DiscardConfirm),
+            Discard::Quit => ("Quitting loses them.", Context::QuitConfirm),
         };
-        let key_style = Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
 
-        let mut text = vec![Line::from("")];
-        text.extend(path_lines.iter().map(|line| {
-            Line::from(Span::styled(
-                line.clone(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ))
-        }));
-        text.extend([
+        let mut body = Self::path_lines(path, area);
+        body.extend([
             Line::from(""),
             Line::from("The changes to this secret have not been saved."),
             Line::from(Span::styled(
@@ -597,96 +569,45 @@ impl MainScreen {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("y", key_style),
-                Span::raw(yes),
-                Span::styled("n/Esc", key_style),
-                Span::raw(no),
-            ]),
         ]);
 
-        let popup = centered(width, text.len() as u16 + 2, area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
-            .title(Span::styled(
-                " Unsaved changes ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
-
-        frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new(text)
-                .alignment(Alignment::Center)
-                .block(block),
-            popup,
+        dialog(
+            frame,
+            area,
+            "Unsaved changes",
+            Color::Yellow,
+            body,
+            keys,
+            None,
         );
     }
 
-    /// Render delete confirmation dialog.
-    ///
-    /// The size is fixed, so the path and the warning are on screen whatever
-    /// the terminal size.
+    /// Render delete confirmation dialog
     fn render_delete_confirmation(frame: &mut Frame, area: Rect, target: &DeleteTarget) {
-        let width = 62;
-        let inner_width = (width.min(area.width) as usize).saturating_sub(4);
-        let path_lines = wrap(&target.path, inner_width);
-        let path_lines = &path_lines[..path_lines.len().min(3)];
-
         let what = match target.versions {
             Some(1) => "Its only version and its metadata are destroyed.".to_string(),
             Some(count) => format!("All {count} versions and the metadata are destroyed."),
             None => "Every version and the metadata are destroyed.".to_string(),
         };
 
-        let key_style = Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
-
-        let mut text = vec![Line::from("")];
-        text.extend(path_lines.iter().map(|line| {
-            Line::from(Span::styled(
-                line.clone(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ))
-        }));
-        text.extend([
+        let mut body = Self::path_lines(&target.path, area);
+        body.extend([
             Line::from(""),
             Line::from(Span::styled(what, Style::default().fg(Color::Red))),
             Line::from(Span::styled(
                 "This cannot be undone.",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("y", key_style),
-                Span::raw(" delete   "),
-                Span::styled("n/Esc", key_style),
-                Span::raw(" cancel"),
-            ]),
         ]);
 
-        let popup = centered(width, text.len() as u16 + 2, area);
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Red))
-            .title(Span::styled(
-                " Delete secret ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ));
-
-        frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new(text)
-                .alignment(Alignment::Center)
-                .block(block),
-            popup,
+        dialog(
+            frame,
+            area,
+            "Delete secret",
+            Color::Red,
+            body,
+            Context::DeleteConfirm,
+            None,
         );
     }
 }
@@ -936,6 +857,7 @@ impl Component for MainScreen {
                 path,
                 data,
                 metadata,
+                ..
             } => {
                 // Create detail view with loaded data
                 let mut detail_view = DetailViewComponent::new(data, path.clone());
@@ -985,7 +907,7 @@ impl Component for MainScreen {
                 }
             }
 
-            Action::SecretLoadFailed { path, message } => {
+            Action::SecretLoadFailed { path, message, .. } => {
                 if self.loading_secret.as_deref() == Some(path.as_str()) {
                     self.loading_secret = None;
                 }
@@ -1001,6 +923,8 @@ impl Component for MainScreen {
                     .is_some_and(|view| view.path() == path)
                 {
                     self.edit_view = None;
+                    // Nothing is unsaved any more, so nothing is asked
+                    self.discard_prompt = None;
                     if self.detail_view.is_none() {
                         // A new secret: go into it once it has been read back
                         self.focus_on_load = Some(path.clone());
@@ -1028,6 +952,7 @@ impl Component for MainScreen {
                     .is_some_and(|view| view.path() == path)
                 {
                     self.edit_view = None;
+                    self.discard_prompt = None;
                 }
                 if self.loading_secret.as_deref() == Some(path.as_str()) {
                     self.loading_secret = None;
@@ -1084,7 +1009,7 @@ impl Component for MainScreen {
                 // one: its result may arrive last.
                 if let Some(detail_view) = &mut self.detail_view
                     && detail_view.path() == path
-                    && detail_view.version_arrived(version)
+                    && detail_view.version_arrived(version, VersionUse::View)
                 {
                     detail_view.load_version(version, data);
                 }
@@ -1096,11 +1021,12 @@ impl Component for MainScreen {
             Action::VersionLoadFailed {
                 path,
                 version,
+                wanted_for,
                 message,
             } => {
                 if let Some(detail_view) = &mut self.detail_view
                     && detail_view.path() == path
-                    && detail_view.version_arrived(version)
+                    && detail_view.version_arrived(version, wanted_for)
                 {
                     self.error_message = Some(message);
                 }
@@ -1117,7 +1043,7 @@ impl Component for MainScreen {
                 // edit in the meantime.
                 if let Some(detail_view) = &mut self.detail_view
                     && detail_view.path() == path
-                    && detail_view.version_arrived(version)
+                    && detail_view.version_arrived(version, VersionUse::Edit)
                     && self.edit_view.is_none()
                 {
                     let mut edit_view = EditViewComponent::new(path, data);
@@ -1163,10 +1089,6 @@ impl Component for MainScreen {
                 });
             }
 
-            Action::HideConfirmation => {
-                self.delete_confirmation = None;
-            }
-
             // Status/error messages
             Action::SetStatus { message } => {
                 self.status_message = Some(message);
@@ -1181,9 +1103,11 @@ impl Component for MainScreen {
             },
 
             // Errors that are not about what the content pane shows
-            Action::DeleteFailed { message }
-            | Action::FolderListFailed { message, .. }
-            | Action::CopyFailed { message } => {
+            Action::DeleteFailed { path, message } => {
+                self.notices
+                    .push_back(format!("Could not delete {path}: {message}"));
+            }
+            Action::FolderListFailed { message, .. } | Action::CopyFailed { message } => {
                 self.notices.push_back(message);
             }
 
@@ -1287,6 +1211,7 @@ mod tests {
 
     fn loaded(path: &str, value: serde_json::Value) -> Action {
         Action::SecretLoaded {
+            request: 0,
             path: path.to_string(),
             data: secret(value),
             metadata: None,
@@ -1295,6 +1220,7 @@ mod tests {
 
     fn loaded_with_versions(path: &str, versions: u64) -> Action {
         Action::SecretLoaded {
+            request: 0,
             path: path.to_string(),
             data: secret(json!({"k": "v"})),
             metadata: Some(SecretMetadata {
@@ -1579,6 +1505,7 @@ mod tests {
         let failed = |path: &str, version| Action::VersionLoadFailed {
             path: path.to_string(),
             version,
+            wanted_for: VersionUse::View,
             message: format!("Could not load version {version} of {path}: permission denied"),
         };
 
@@ -1721,6 +1648,7 @@ mod tests {
         // next selection, in place of its "Loading" placeholder and over
         // folders, until Esc.
         let failed = |path: &str| Action::SecretLoadFailed {
+            request: 0,
             path: path.to_string(),
             message: "permission denied".to_string(),
         };
@@ -2146,7 +2074,8 @@ mod tests {
                 message: "Could not save /other: Access denied".to_string(),
             },
             Action::DeleteFailed {
-                message: "Could not delete /other: Access denied".to_string(),
+                path: "/other".to_string(),
+                message: "Access denied".to_string(),
             },
             Action::FolderListFailed {
                 request: 1,
@@ -2195,7 +2124,7 @@ mod tests {
             // Every word of it is there at 80x24, in order
             let screen_text = text(screen, ctx, 80, 24);
             crate::tui::components::popup::assert_shown_whole(&screen_text, message);
-            assert!(screen_text.contains("Esc close"), "{screen_text}");
+            assert!(screen_text.contains("Esc/Enter close"), "{screen_text}");
 
             // Nothing else happens until it is closed: `q` does not quit
             for c in ['q', 'd', 'n', 'p'] {
@@ -2526,5 +2455,160 @@ mod tests {
 
         let header = header_of(false, "https://vault.example.com:8200");
         assert!(!header.contains("TLS"), "{header}");
+    }
+
+    fn ctrl_s(screen: &mut MainScreen, ctx: &mut ComponentContext) -> Option<Action> {
+        screen
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                ctx,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn the_question_about_unsaved_changes_goes_when_its_editor_goes() {
+        // Regression: Ctrl+S, then `q` from the list before the save
+        // returned. The save closed the editor, the question was no longer
+        // drawn, and it still took every key: a later `y` quit.
+        with_screen(|screen, ctx| {
+            edit_with_a_change(screen, ctx);
+            assert!(ctrl_s(screen, ctx).is_some());
+            press(screen, ctx, KeyCode::Tab);
+            press(screen, ctx, KeyCode::Char('q'));
+            assert!(text(screen, ctx, 80, 24).contains(" Unsaved changes "));
+
+            let saved = Action::SecretSaved {
+                path: "/a".to_string(),
+            };
+            screen.update(saved, ctx).unwrap();
+
+            // Nothing is unsaved any more: no question, and keys work
+            assert!(screen.edit_view.is_none());
+            assert!(!screen.captures_input());
+            assert!(!text(screen, ctx, 80, 24).contains(" Unsaved changes "));
+            let left_for_root = press(screen, ctx, KeyCode::Char('y'));
+            assert!(
+                !matches!(left_for_root, Some(Action::QuitNow)),
+                "a stray `y` must not quit"
+            );
+        });
+
+        // Esc in the editor cannot ask while the save is on its way: the
+        // editor takes no key until the answer is there
+        with_screen(|screen, ctx| {
+            edit_with_a_change(screen, ctx);
+            assert!(ctrl_s(screen, ctx).is_some());
+            press(screen, ctx, KeyCode::Esc);
+            assert!(!text(screen, ctx, 80, 24).contains(" Unsaved changes "));
+            assert!(screen.edit_view.is_some());
+        });
+    }
+
+    #[test]
+    fn the_editor_takes_no_changes_while_its_save_is_on_its_way() {
+        // Regression: the editor stayed editable after Ctrl+S, and the
+        // completed save closed it, dropping what was typed meanwhile.
+        with_screen(|screen, ctx| {
+            edit_with_a_change(screen, ctx);
+            assert!(ctrl_s(screen, ctx).is_some());
+            assert!(text(screen, ctx, 80, 24).contains("saving"));
+
+            // Typed while the save is in flight: not taken
+            press(screen, ctx, KeyCode::Enter);
+            press(screen, ctx, KeyCode::Char('9'));
+            press(screen, ctx, KeyCode::Enter);
+            press(screen, ctx, KeyCode::Char('a'));
+            assert_eq!(edited(screen), secret(json!({"host": "db2"})));
+            assert!(ctrl_s(screen, ctx).is_none(), "one save at a time");
+
+            // A save that fails gives the editor back, with the fields
+            let failed = Action::SaveFailed {
+                path: "/a".to_string(),
+                message: "Could not save /a: Access denied".to_string(),
+            };
+            screen.update(failed, ctx).unwrap();
+            press(screen, ctx, KeyCode::Enter);
+            press(screen, ctx, KeyCode::Char('9'));
+            press(screen, ctx, KeyCode::Enter);
+            assert_eq!(edited(screen), secret(json!({"host": "db29"})));
+        });
+    }
+
+    #[test]
+    fn a_finished_delete_does_not_close_the_question_about_another_secret() {
+        // The completion of a delete used to send "close the question"
+        // along, which closed one asked meanwhile about another secret.
+        // Nothing sends that any more; a finished delete leaves it open.
+        with_screen(|screen, ctx| {
+            let ask = Action::ShowDeleteConfirmation {
+                item_name: "/b".to_string(),
+            };
+            screen.update(ask, ctx).unwrap();
+
+            let deleted = Action::SecretDeleted {
+                path: "/a".to_string(),
+            };
+            screen.update(deleted, ctx).unwrap();
+
+            assert!(text(screen, ctx, 80, 24).contains(" Delete secret "));
+            let confirmed = screen.handle_key(key(KeyCode::Char('y')), ctx).unwrap();
+            assert!(
+                matches!(&confirmed, Some(Action::DeleteSecret { path }) if path == "/b"),
+                "{confirmed:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_version_asked_for_to_view_and_then_to_edit_opens_the_editor() {
+        // Regression: both requests shared one "awaited" slot, so whichever
+        // answer came first used it up and the other was dropped.
+        for view_arrives_first in [true, false] {
+            with_screen(|screen, ctx| {
+                screen.update(loaded_with_versions("/b", 3), ctx).unwrap();
+                ask_for_version(screen, ctx, 2, KeyCode::Enter);
+                ask_for_version(screen, ctx, 2, KeyCode::Char('n'));
+
+                let view = version_loaded("/b", 2, json!({"k": "two"}));
+                let edit = Action::VersionLoadedForEdit {
+                    path: "/b".to_string(),
+                    version: 2,
+                    data: secret(json!({"k": "two"})),
+                };
+                let results = if view_arrives_first {
+                    [view, edit]
+                } else {
+                    [edit, view]
+                };
+                for result in results {
+                    screen.update(result, ctx).unwrap();
+                }
+
+                // What was asked for last is what happens
+                assert_eq!(edited(screen), secret(json!({"k": "two"})));
+            });
+        }
+    }
+
+    #[test]
+    fn the_editor_footer_lists_the_reveal_keys_at_80_columns() {
+        // They were in the table but the first hints to be dropped, so at
+        // 80 columns nothing on screen said the editor can reveal a value
+        with_screen(|screen, ctx| {
+            screen.update(loaded("/a", json!({"k": "v"})), ctx).unwrap();
+            screen.update(Action::EditSecret, ctx).unwrap();
+
+            let footer = rows(screen, ctx, 80, 24).pop().unwrap();
+            for hint in [
+                "Space peek",
+                "v show all",
+                "Ctrl+s save",
+                "Esc cancel",
+                "Enter edit",
+            ] {
+                assert!(footer.contains(hint), "no {hint:?} in {footer:?}");
+            }
+        });
     }
 }

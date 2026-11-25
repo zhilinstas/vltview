@@ -175,7 +175,7 @@ The navigation cursor is the selection, and the content pane shows it.
 
 ### State Access
 - Read-only access via `&ComponentContext` (contains `&App`)
-- Mutations go through actions → App layer services
+- Changes go through actions. Requests to Vault are made by the App layer services, in the background; what is on screen (`AppState`) is changed only by `Root`, when a result it still wants arrives
 - UI state (selection, scroll) lives in components
 - Business state (the folder on screen, the history) lives in AppState
 
@@ -239,6 +239,8 @@ src/
 1. Handle the key in the component's `handle_key()`
 2. Add or change the entry in `src/tui/keymap.rs` for that context. Footers and the help overlay are generated from it, so a key that is not there is not shown anywhere
 3. Footer labels are short; hints that do not fit the terminal width are dropped by priority, never cut
+4. A second key for the same thing gets its own entry with footer priority 0 ("The same as c"), not a mention in another entry's help text: `every_hinted_key_does_something_where_it_is_hinted` in `root.rs` presses each key of each entry in the place it is hinted for, and can only press what the table spells out. A new context needs a way in there (`ways_into`)
+5. Do not write a key hint as a string anywhere else, in a dialog either
 
 ### Adding a New Component
 
@@ -316,7 +318,7 @@ Environment variables:
 
 ### Layout
 - The main screen has one header line and one footer line; each pane is a single bordered block with its state on the border. Do not add nested boxes: at 80x24 every row counts. The one box inside a pane is the text box of the field being typed in the editor: it is there only while typing, and it has to stand out from the list above it
-- Popups have a fixed size (`popup::centered`), not a percentage of the screen, so their text is all on screen on a small terminal
+- Popups have a fixed size (`popup::centered`), not a percentage of the screen, so their text is all on screen on a small terminal. A question or a message over the main screen is drawn with `popup::dialog`, which adds the keys that answer it from the key table
 - Text that carries a warning or instructions is wrapped or dropped whole, never cut off mid-sentence. Check new UI at 80x24 (the render tests draw into a `TestBackend` of that size)
 
 ### KV Version Handling
@@ -452,7 +454,7 @@ Clipboard manager automatically clears copied secrets after 30 seconds:
 - Logs auto-clear events: `audit_log::log_security_event("clipboard.auto_cleared", ...)`
 
 ### When Adding New Features
-- **Never log tokens or secret values**, not even in part. `audit_log::redact_secret_data()` keeps the field names and drops every value
+- **Never log tokens or secret values**, not even in part. `audit_log::redact_secret_data()` keeps the field names and drops every value. The one thing logged about a value is the size in bytes of what was copied to the clipboard (`log_clipboard_copy`); do not add to that
 - **The token has one owner.** `vault::Token` is not `Clone` and is wiped on drop. It moves from where it was read into `Config`, and from there into the `AuthManager` when `VaultClient::new` takes the configuration; the client, `KvEngine` and `PolicyApi` share that `Arc<AuthManager>`. Do not copy `Token::expose()` into a `String`, do not make either type `Clone`, and do not keep a `Config` around. What this does not cover (copies inside reqwest, the environment, the argument list) is listed under "Security Notes" in the README; keep that list true
 - **Apply rate limiting** to new Vault API operations
 - **Sanitize all user input** going to Vault API

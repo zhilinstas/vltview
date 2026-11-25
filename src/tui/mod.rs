@@ -134,9 +134,6 @@ pub struct Tui {
 
     /// Root component managing all screens
     root: Root,
-
-    /// TLS certificate verification is off
-    insecure: bool,
 }
 
 impl Tui {
@@ -145,8 +142,6 @@ impl Tui {
     /// The terminal is taken last. Whatever fails before that is reported on
     /// a terminal nobody has touched.
     pub fn new(config: Config, initial_path: String) -> Result<Self> {
-        let insecure = config.insecure;
-
         // Create App layer
         let app = App::new(config, initial_path)?;
 
@@ -164,7 +159,6 @@ impl Tui {
             app,
             clipboard,
             root,
-            insecure,
         })
     }
 
@@ -180,7 +174,7 @@ impl Tui {
         // Initialize root component
         self.root.init(&self.app)?;
 
-        if self.insecure {
+        if !self.app.vault_client().tls_verified() {
             show_insecure_notice(&mut self.root, &mut self.app)?;
         }
 

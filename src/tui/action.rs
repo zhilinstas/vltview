@@ -92,9 +92,6 @@ pub enum Action {
     /// Show delete confirmation dialog
     ShowDeleteConfirmation { item_name: String },
 
-    /// Hide confirmation dialog
-    HideConfirmation,
-
     /// Show create secret input
     ShowCreateSecretInput,
 
@@ -110,10 +107,19 @@ pub enum Action {
     OpenSecret { path: String },
 
     /// A secret could not be loaded (async completion)
-    SecretLoadFailed { path: String, message: String },
+    SecretLoadFailed {
+        /// Number `Root` gave the load, as for `SecretLoaded`
+        request: u64,
+        path: String,
+        message: String,
+    },
 
     /// Secret loaded successfully (async completion)
     SecretLoaded {
+        /// Number `Root` gave the load. Two loads of one path can be on
+        /// their way at once (the preview and the read after a save); only
+        /// the later one may be shown, whichever arrives last.
+        request: u64,
         path: String,
         data: SecretData,
         metadata: Option<SecretMetadata>,
@@ -145,8 +151,9 @@ pub enum Action {
     /// Secret deleted successfully
     SecretDeleted { path: String },
 
-    /// A secret could not be deleted (async completion)
-    DeleteFailed { message: String },
+    /// A secret could not be deleted (async completion). `message` is the
+    /// reason; the screen says which secret.
+    DeleteFailed { path: String, message: String },
 
     /// View specific version of secret
     ViewSecretVersion { path: String, version: u64 },
@@ -168,11 +175,12 @@ pub enum Action {
     /// Create new version from historical version
     CreateFromVersion { path: String, version: u64 },
 
-    /// A version of a secret could not be loaded, for viewing or for
-    /// editing (async completion)
+    /// A version of a secret could not be loaded (async completion)
     VersionLoadFailed {
         path: String,
         version: u64,
+        /// What it had been asked for
+        wanted_for: VersionUse,
         message: String,
     },
 
@@ -259,6 +267,15 @@ pub enum ScrollDirection {
     Top,
     /// Scroll to bottom
     Bottom,
+}
+
+/// What a version of a secret was asked for
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionUse {
+    /// To be shown in the secret pane
+    View,
+    /// To be opened in the editor, as a copy to restore
+    Edit,
 }
 
 /// What moved the navigation cursor

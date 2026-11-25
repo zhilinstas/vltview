@@ -39,6 +39,11 @@ behaviour" before upgrading: several keys do something different from 0.2.4.
   fields with the same key one silently replaced the other. Both are refused
   with a message.
 - Unsaved edits were dropped by a single Esc, or by `q` from the list.
+- What was typed after Ctrl+S, while the save was on its way, was dropped
+  when the save completed. The editor now takes no changes until the answer
+  is there.
+- A read of a secret that was started before a save could arrive after the
+  read that followed the save, and put the old content back on screen.
 
 ### Fixed: security
 
@@ -81,10 +86,12 @@ behaviour" before upgrading: several keys do something different from 0.2.4.
 - **The screen is laid out differently**: one header line with the Vault
   address, one footer line with the keys that work right now, and the secret
   in a single pane. It is designed to be usable at 80x24.
-- **The secret under the cursor is shown without pressing Enter.** It is read
-  from Vault once the cursor rests on it, so scrolling through a folder does
-  not read every secret on the way. Each read is an entry in Vault's audit
-  log, where before only Enter read.
+- **The secret pane always shows what the cursor is on**, whatever moved the
+  cursor (keys, the filter, a reload, opening a folder), and it never keeps
+  the previous secret on screen while the next one loads. The secret is read
+  from Vault once the cursor rests on it. 0.2.4 read on every cursor step,
+  so scrolling through a folder now puts far fewer reads into Vault's audit
+  log.
 - **Enter** on a secret moves into it. In the editor, Enter in a field
   finishes the field; a line break in a value is Alt+Enter or Ctrl+J.
 - **Ctrl+S** saves the secret from anywhere in the editor, in one step.

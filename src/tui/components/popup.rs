@@ -1,10 +1,14 @@
 //! Helpers shared by the popups and panes.
 
 use ratatui::{
-    layout::Rect,
+    Frame,
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
-    text::Span,
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
+
+use crate::tui::keymap::{self, Context};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A rectangle of the given size centred in `area`.
@@ -21,6 +25,57 @@ pub fn centered(width: u16, height: u16, area: Rect) -> Rect {
         width,
         height,
     }
+}
+
+/// Width of the dialogs drawn over the main screen
+const DIALOG_WIDTH: u16 = 62;
+
+/// Columns of text a dialog over `area` has
+pub fn dialog_text_width(area: Rect) -> usize {
+    (DIALOG_WIDTH.min(area.width) as usize).saturating_sub(4)
+}
+
+/// Draw a dialog over `area`: centred, of fixed width, as tall as its text.
+///
+/// Its last line is the keys that answer it, taken from the key table for
+/// `keys` like every other hint, followed by `note` if there is one.
+pub fn dialog(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    color: Color,
+    body: Vec<Line<'static>>,
+    keys: Context,
+    note: Option<String>,
+) {
+    let mut hints = keymap::footer_line(&[keys], dialog_text_width(area) as u16);
+    if let Some(note) = note {
+        hints.spans.push(Span::styled(
+            format!("   {note}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let mut text = vec![Line::from("")];
+    text.extend(body);
+    text.extend([Line::from(""), hints]);
+
+    let popup = centered(DIALOG_WIDTH, text.len() as u16 + 2, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(text)
+            .alignment(Alignment::Center)
+            .block(block),
+        popup,
+    );
 }
 
 /// Border colour of a pane
