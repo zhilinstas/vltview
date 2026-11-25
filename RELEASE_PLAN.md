@@ -82,11 +82,14 @@ Behaviour changes to put in the changelog:
 
 ## Step 3: robustness
 
-- [ ] Terminal is left in raw mode if startup fails; build `App` before
-      touching the terminal, or use a guard
-- [ ] No panic hook: panic messages are lost in the alternate screen
-- [ ] `--insecure` warning is printed after the alternate screen is entered,
-      so it is never visible
+- [x] Terminal is left in raw mode if startup fails; build `App` before
+      touching the terminal, or use a guard. Fixed: the terminal is taken
+      after `App::new`, and restored on every way out
+- [x] No panic hook: panic messages are lost in the alternate screen. Fixed:
+      the hook restores the terminal, then prints the message and location
+- [x] `--insecure` warning is printed after the alternate screen is entered,
+      so it is never visible. Fixed: printed before the UI starts, and
+      "TLS NOT VERIFIED" stays in the header
 - [x] Bracketed paste is off: pasted text runs as commands (`d` then `y`
       confirms a permanent delete). Fixed with step 4: a paste goes into the
       text input that has focus and is dropped anywhere else
@@ -113,14 +116,18 @@ Behaviour changes to put in the changelog:
       edit view shows every value in clear. Fixed: every masked value is the
       same eight dots, and the editor masks its list too, with the same
       reveal keys (Space, `v`)
-- [ ] False "token provided via command-line argument" warning when the token
-      comes from `VAULT_TOKEN`
-- [ ] Audit log entries drop their structured fields (no path, no action), and
-      "Authenticated to Vault successfully" is logged before any request
-- [ ] A malformed `~/.vltview.yaml` is silently ignored; a config file must
-      contain both `vault_addr` and `vault_token` to parse at all
-- [ ] Token `Zeroize` is nominal: the token is cloned into three
-      `AuthManager`s and stays in `Config`
+- [x] False "token provided via command-line argument" warning when the token
+      comes from `VAULT_TOKEN`. Fixed
+- [x] Audit log entries drop their structured fields (no path, no action), and
+      "Authenticated to Vault successfully" is logged before any request.
+      Fixed: each entry shows action, path and count; "authenticated" is
+      logged after the first request Vault accepts
+- [x] A malformed `~/.vltview.yaml` is silently ignored; a config file must
+      contain both `vault_addr` and `vault_token` to parse at all. Fixed: a
+      bad file or an unknown key stops the start; any subset of keys is fine
+- [x] Token `Zeroize` is nominal: the token is cloned into three
+      `AuthManager`s and stays in `Config`. Fixed: one owner, wiped on drop;
+      the README says what that does not cover
 
 ### From the review of the pull request
 
@@ -152,14 +159,17 @@ Open:
       check only looks at the folder on screen (from code). Fixed: a create
       is written with check-and-set 0, so Vault refuses it; tried against the
       dev Vault with `myapp/api`, which stayed at version 1
-- [ ] Keys that work but are not in the key table: the help overlay's own
+- [x] Keys that work but are not in the key table (added, and a test now
+      presses every key in the table): the help overlay's own
       keys, `q` on the connecting screen, Esc to dismiss an error, Home/End
       in the list, and PgUp/PgDn/g/G, `?` and `h` in the editor
 - [x] Warnings can still be cut: the restore note beyond two lines, the name
       prompt's error, and policy errors, which are not wrapped at all.
       Fixed: each is wrapped at spaces and shown whole, or replaced by a
       shorter wording where there is no room
-- [ ] CLAUDE.md asks for `ListState` and for no nested boxes; the navigation
+- [x] CLAUDE.md asks for `ListState` and for no nested boxes (the navigation
+      pane now uses `ListState`; the rule names the log screen and the
+      editor's text box as the exceptions, with the reason); the navigation
       pane and the log screen scroll by hand and the editor draws a box
       inside the pane. Follow the rule or say what it really requires
 - [x] Duplication to remove with step 5 (removed): the policy client repeats the
@@ -335,30 +345,34 @@ How it was done, where that is not obvious from the item:
   - Scaffolding: `FocusState`, the `CacheManager` stub, `OperationId`,
     unused `VaultClient` getters, `redact_secret_value`,
     `DetailViewComponent::mode`, `EditViewComponent::get_data`
-- [ ] Reconcile CLAUDE.md and README with the code: KV v1 support, caching,
+- [x] Reconcile CLAUDE.md and README with the code: KV v1 support, caching,
       audit logging, `SecretService`/`NavigationController` responsibilities.
+      Done: both say KV v2 at `secret/` only and no cache.
       The key bindings are done (step 4); the README screenshots need
       retaking
-- [ ] README documents `insecure_skip_verify`; the real config key is
-      `insecure`
-- [ ] Dev environment: the docker-compose seed step fails (`vault-init.sh`
+- [x] README documents `insecure_skip_verify`; the real config key is
+      `insecure`. Fixed, with a table of every key
+- [x] Dev environment (fixed, and run from a fresh clone): the docker-compose seed step fails (`vault-init.sh`
       needs bash, the Vault image has none); `docker-build.sh` points at
       `/tmp/Dockerfile.compat`; `make run-with-docker` passes `/secret/myapp`,
       which resolves to `secret/secret/myapp`
-- [ ] Tests: extend coverage of key routing and the HTTP client (step 2
+- [x] Tests (done): extend coverage of key routing and the HTTP client (step 2
       added the first of both); nothing covers the policy client yet
 
 ## Step 6: release engineering
 
-- [ ] Replace the archived `actions/create-release@v1` and
-      `actions/upload-release-asset@v1` with `gh release`
-- [ ] Pin GitHub Actions by commit SHA
+- [x] Replace the archived `actions/create-release@v1` and
+      `actions/upload-release-asset@v1` with `gh release`. Done; not run
+      yet, that is what the release candidate is for
+- [x] Pin GitHub Actions by commit SHA
 - [ ] Tag `v0.3.0-rc.1` to exercise the release workflow (musl and both macOS
       targets) before the final tag
-- [ ] Bump the version, write the changelog, tag `v0.3.0`
+- [x] Bump the version and write the changelog (`CHANGELOG.md`)
+- [ ] Tag `v0.3.0`, after the release candidate has built and the user has
+      confirmed
 
 ## Open decision
 
 Configurable mounts and KV v1 support. The mount is hard-coded to `secret/`
-and only KV v2 works, though the docs claim v1 support. Recommendation: defer
-both past 0.3.0 and correct the docs instead.
+and only KV v2 works. Taken for 0.3.0: both are deferred, and the README and
+CLAUDE.md now say what is supported.
