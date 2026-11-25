@@ -1,17 +1,18 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::RwLock;
+
+/// How many folders the history remembers
+const MAX_HISTORY: usize = 50;
 
 /// Application state manager
 pub struct AppState {
-    /// The folder on screen: its path and its items, behind one lock so
-    /// that they can only change together
+    /// The folder on screen and the folders visited, behind one lock so
+    /// that the path, its items and the place in the history can only
+    /// change together
     path: RwLock<PathState>,
 
     /// Secret cache
     cache: RwLock<CacheManager>,
-
-    /// Navigation history
-    history: RwLock<HistoryManager>,
 }
 
 impl AppState {
@@ -20,27 +21,67 @@ impl AppState {
         Self {
             path: RwLock::new(PathState::new(initial_path)),
             cache: RwLock::new(CacheManager::new()),
-            history: RwLock::new(HistoryManager::new()),
         }
     }
 
     /// Get current path
     pub fn current_path(&self) -> String {
-        self.path.read().unwrap().current.clone()
+        self.path.read().unwrap().current().to_string()
     }
 
     /// Show another folder: the path and its items change in one step, so
-    /// nothing can read one folder's path with another folder's items
+    /// nothing can read one folder's path with another folder's items.
+    ///
+    /// The folder becomes the newest entry of the history; whatever was
+    /// ahead of the old place is dropped, as in a browser.
     pub fn show_folder(&self, path: String, items: Vec<String>) {
-        let mut path_state = self.path.write().unwrap();
-        let old_path = std::mem::replace(&mut path_state.current, path);
-        path_state.items = items;
-        let moved = old_path != path_state.current;
-        drop(path_state);
-
-        if moved {
-            self.history.write().unwrap().push(old_path);
+        let mut state = self.path.write().unwrap();
+        if state.current() != path {
+            let ahead = state.position + 1;
+            state.visited.truncate(ahead);
+            state.visited.push(path);
+            if state.visited.len() > MAX_HISTORY {
+                state.visited.remove(0);
+            }
+            state.position = state.visited.len() - 1;
         }
+        state.items = items;
+    }
+
+    /// Replace the items of the folder on screen (a reload of `path`).
+    /// Returns false, and changes nothing, if another folder is on screen.
+    pub fn reload_folder(&self, path: &str, items: Vec<String>) -> bool {
+        let mut state = self.path.write().unwrap();
+        if state.current() != path {
+            return false;
+        }
+        state.items = items;
+        true
+    }
+
+    /// Where the folder on screen is in the history; 0 is the oldest entry
+    pub fn history_position(&self) -> usize {
+        self.path.read().unwrap().position
+    }
+
+    /// The folder at `position` in the history, if there is one
+    pub fn history_entry(&self, position: usize) -> Option<String> {
+        self.path.read().unwrap().visited.get(position).cloned()
+    }
+
+    /// Show the folder at `position` in the history. The history itself is
+    /// not changed: going back and forward only moves along it.
+    ///
+    /// Returns false, and changes nothing, if `path` is not what the history
+    /// holds there (it was rewritten since the step was asked for).
+    pub fn show_history_entry(&self, position: usize, path: &str, items: Vec<String>) -> bool {
+        let mut state = self.path.write().unwrap();
+        if state.visited.get(position).map(String::as_str) != Some(path) {
+            return false;
+        }
+        state.position = position;
+        state.items = items;
+        true
     }
 
     /// Invalidate cache for path
@@ -53,49 +94,37 @@ impl AppState {
         self.cache.write().unwrap().clear();
     }
 
-    /// Go back in history
-    pub fn go_back(&self) -> Option<String> {
-        self.history.write().unwrap().back()
-    }
-
-    /// Go forward in history
-    pub fn go_forward(&self) -> Option<String> {
-        self.history.write().unwrap().forward()
-    }
-
     /// Get current list items
     pub fn list_items(&self) -> Vec<String> {
         self.path.read().unwrap().items.clone()
     }
-
-    /// Replace the items of the folder on screen (a reload of `path`).
-    /// Returns false, and changes nothing, if another folder is on screen.
-    pub fn reload_folder(&self, path: &str, items: Vec<String>) -> bool {
-        let mut path_state = self.path.write().unwrap();
-        if path_state.current != path {
-            return false;
-        }
-        path_state.items = items;
-        true
-    }
 }
 
-/// Path state tracking
+/// The folder on screen and how the user got there
 #[derive(Debug, Clone)]
 pub struct PathState {
-    /// Current path in Vault
-    pub current: String,
+    /// Folders visited, oldest first. Never empty.
+    visited: Vec<String>,
 
-    /// Items at current path
-    pub items: Vec<String>,
+    /// Which of them is on screen
+    position: usize,
+
+    /// Items of the folder on screen
+    items: Vec<String>,
 }
 
 impl PathState {
     pub fn new(initial_path: String) -> Self {
         Self {
-            current: Self::normalize_path(initial_path),
+            visited: vec![Self::normalize_path(initial_path)],
+            position: 0,
             items: Vec::new(),
         }
+    }
+
+    /// Path of the folder on screen
+    pub fn current(&self) -> &str {
+        &self.visited[self.position]
     }
 
     /// Normalize path (ensure leading slash, no trailing slash unless root)
@@ -141,63 +170,6 @@ impl CacheManager {
     }
 }
 
-/// History manager for navigation
-#[derive(Debug, Clone)]
-pub struct HistoryManager {
-    /// History stack (back)
-    back_stack: VecDeque<String>,
-
-    /// Forward stack
-    forward_stack: VecDeque<String>,
-
-    /// Max history size
-    max_size: usize,
-}
-
-impl HistoryManager {
-    pub fn new() -> Self {
-        Self {
-            back_stack: VecDeque::new(),
-            forward_stack: VecDeque::new(),
-            max_size: 50,
-        }
-    }
-
-    /// Push path to history
-    pub fn push(&mut self, path: String) {
-        // Clear forward stack on new navigation
-        self.forward_stack.clear();
-
-        // Add to back stack
-        self.back_stack.push_back(path);
-
-        // Limit size
-        if self.back_stack.len() > self.max_size {
-            self.back_stack.pop_front();
-        }
-    }
-
-    /// Go back in history
-    pub fn back(&mut self) -> Option<String> {
-        if let Some(path) = self.back_stack.pop_back() {
-            self.forward_stack.push_back(path.clone());
-            Some(path)
-        } else {
-            None
-        }
-    }
-
-    /// Go forward in history
-    pub fn forward(&mut self) -> Option<String> {
-        if let Some(path) = self.forward_stack.pop_back() {
-            self.back_stack.push_back(path.clone());
-            Some(path)
-        } else {
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,27 +177,94 @@ mod tests {
     #[test]
     fn test_path_normalization() {
         let state = PathState::new("/test/path/".to_string());
-        assert_eq!(state.current, "/test/path");
+        assert_eq!(state.current(), "/test/path");
 
         let state2 = PathState::new("test/path".to_string());
-        assert_eq!(state2.current, "/test/path");
+        assert_eq!(state2.current(), "/test/path");
 
         let state3 = PathState::new("/".to_string());
-        assert_eq!(state3.current, "/");
+        assert_eq!(state3.current(), "/");
+    }
+
+    fn show(state: &AppState, path: &str) {
+        state.show_folder(path.to_string(), vec![]);
+    }
+
+    /// Step along the history by `steps`, as `Root` does once the folder
+    /// has been listed
+    fn step(state: &AppState, steps: isize) -> bool {
+        let Some(position) = state.history_position().checked_add_signed(steps) else {
+            return false;
+        };
+        match state.history_entry(position) {
+            Some(path) => state.show_history_entry(position, &path, vec![]),
+            None => false,
+        }
     }
 
     #[test]
-    fn test_history() {
-        let mut history = HistoryManager::new();
+    fn history_goes_back_and_forward_like_a_browser() {
+        // Regression: going back pushed the folder just left onto the same
+        // stack, so `back` alternated between two folders and the forward
+        // stack was emptied by every step.
+        let state = AppState::new("/a".to_string());
+        show(&state, "/b");
+        show(&state, "/c");
 
-        history.push("/path1".to_string());
-        history.push("/path2".to_string());
+        assert!(step(&state, -1));
+        assert!(step(&state, -1));
+        assert_eq!(state.current_path(), "/a");
+        assert!(!step(&state, -1), "nothing before the first folder");
+        assert_eq!(state.current_path(), "/a");
 
-        let back = history.back();
-        assert_eq!(back, Some("/path2".to_string()));
+        assert!(step(&state, 1));
+        assert!(step(&state, 1));
+        assert_eq!(state.current_path(), "/c");
+        assert!(!step(&state, 1), "nothing after the last folder");
+        assert_eq!(state.current_path(), "/c");
+    }
 
-        let forward = history.forward();
-        assert_eq!(forward, Some("/path2".to_string()));
+    #[test]
+    fn a_new_folder_drops_what_was_ahead() {
+        let state = AppState::new("/a".to_string());
+        show(&state, "/b");
+        show(&state, "/c");
+        step(&state, -1);
+        step(&state, -1);
+
+        show(&state, "/d");
+        assert!(!step(&state, 1));
+        assert!(step(&state, -1));
+        assert_eq!(state.current_path(), "/a");
+        assert_eq!(state.history_entry(1).as_deref(), Some("/d"));
+        assert_eq!(state.history_entry(2), None);
+    }
+
+    #[test]
+    fn showing_the_same_folder_again_adds_no_entry() {
+        let state = AppState::new("/a".to_string());
+        show(&state, "/a");
+        assert_eq!(state.history_position(), 0);
+        assert_eq!(state.history_entry(1), None);
+    }
+
+    #[test]
+    fn a_history_step_that_no_longer_matches_is_refused() {
+        let state = AppState::new("/a".to_string());
+        show(&state, "/b");
+        assert!(!state.show_history_entry(0, "/other", vec![]));
+        assert_eq!(state.current_path(), "/b");
+    }
+
+    #[test]
+    fn the_history_is_bounded() {
+        let state = AppState::new("/0".to_string());
+        for i in 1..=MAX_HISTORY + 10 {
+            show(&state, &format!("/{i}"));
+        }
+        assert_eq!(state.history_position(), MAX_HISTORY - 1);
+        assert_eq!(state.history_entry(0).as_deref(), Some("/11"));
+        assert_eq!(state.current_path(), format!("/{}", MAX_HISTORY + 10));
     }
 
     #[test]

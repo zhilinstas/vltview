@@ -26,6 +26,8 @@ enum ListingKind {
     Open,
     /// Read the folder on screen again
     Reload,
+    /// Go back or forward to the folder at this position in the history
+    History { position: usize },
 }
 
 /// The folder listing that is wanted. Listings are not cancelled, so their
@@ -354,16 +356,12 @@ impl Root {
             }
 
             Action::HistoryBack => {
-                if let Some(path) = app.state().go_back() {
-                    self.request_listing(app, path, ListingKind::Open);
-                }
+                self.history_step(app, -1);
                 return Ok(());
             }
 
             Action::HistoryForward => {
-                if let Some(path) = app.state().go_forward() {
-                    self.request_listing(app, path, ListingKind::Open);
-                }
+                self.history_step(app, 1);
                 return Ok(());
             }
 
@@ -385,6 +383,9 @@ impl Root {
                     ListingKind::Open => state.show_folder(path.clone(), items.clone()),
                     ListingKind::Reload => {
                         state.reload_folder(path, items.clone());
+                    }
+                    ListingKind::History { position } => {
+                        state.show_history_entry(position, path, items.clone());
                     }
                 }
                 return self.process_action(Action::StateUpdated, app);
@@ -623,11 +624,37 @@ impl Root {
                 request,
                 path: failed_path.clone(),
                 message: match kind {
-                    ListingKind::Open => format!("Could not open {failed_path}: {e}"),
                     ListingKind::Reload => format!("Could not reload {failed_path}: {e}"),
+                    ListingKind::Open | ListingKind::History { .. } => {
+                        format!("Could not open {failed_path}: {e}")
+                    }
                 },
             },
         );
+    }
+
+    /// Go back (`-1`) or forward (`1`) in the history.
+    ///
+    /// The place in the history moves only when the folder has been listed,
+    /// so a step that fails leaves the user where they were. A step asked
+    /// for while another one is on its way continues from where that one is
+    /// heading: `b`, `b` goes two folders back however slow Vault is.
+    fn history_step(&mut self, app: &App, steps: isize) {
+        let state = app.state();
+        let from = match self.listing {
+            Some(ListingRequest {
+                kind: ListingKind::History { position },
+                ..
+            }) => position,
+            _ => state.history_position(),
+        };
+
+        // At either end of the history there is nowhere to go
+        if let Some(position) = from.checked_add_signed(steps)
+            && let Some(path) = state.history_entry(position)
+        {
+            self.request_listing(app, path, ListingKind::History { position });
+        }
     }
 
     /// What the listing `request` was for, if it is still the one wanted.
@@ -1249,5 +1276,128 @@ mod tests {
         let reload = listed(listing(&root), "/a", &["dir/"]);
         root.process_action(reload, &mut app).unwrap();
         assert_eq!(app.state().list_items(), ["dir/"]);
+    }
+
+    /// Press a key and process what it leads to
+    fn press(root: &mut Root, app: &mut App, c: char) {
+        let key = KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        if let Some(action) = root.handle_key_event(key, app).unwrap() {
+            root.process_action(action, app).unwrap();
+        }
+    }
+
+    /// Open `path` and let its listing arrive
+    fn visit(root: &mut Root, app: &mut App, path: &str) {
+        root.process_action(open(path), app).unwrap();
+        answer(root, app, path);
+    }
+
+    /// Let the awaited listing arrive; it must be for `path`
+    fn answer(root: &mut Root, app: &mut App, path: &str) {
+        let result = listed(listing(root), path, &["x"]);
+        root.process_action(result, app).unwrap();
+        assert_eq!(app.state().current_path(), path);
+    }
+
+    #[tokio::test]
+    async fn history_keys_walk_back_and_forward() {
+        // Regression: `b` went back and forth between the last two folders,
+        // and `f` never did anything.
+        let mut app = test_app_at("/a", &["x"]);
+        let mut root = test_root(&app);
+        visit(&mut root, &mut app, "/b");
+        visit(&mut root, &mut app, "/c");
+
+        press(&mut root, &mut app, 'b');
+        answer(&mut root, &mut app, "/b");
+        press(&mut root, &mut app, 'b');
+        answer(&mut root, &mut app, "/a");
+
+        press(&mut root, &mut app, 'f');
+        answer(&mut root, &mut app, "/b");
+        press(&mut root, &mut app, 'f');
+        answer(&mut root, &mut app, "/c");
+    }
+
+    #[tokio::test]
+    async fn history_keys_do_nothing_at_either_end() {
+        let mut app = test_app_at("/a", &["x"]);
+        let mut root = test_root(&app);
+
+        // Nowhere to go back or forward to yet
+        press(&mut root, &mut app, 'b');
+        press(&mut root, &mut app, 'f');
+        assert!(root.listing.is_none());
+        assert_eq!(spawned(&root), 0);
+
+        visit(&mut root, &mut app, "/b");
+        press(&mut root, &mut app, 'f');
+        assert!(root.listing.is_none());
+        assert_eq!(app.state().current_path(), "/b");
+
+        press(&mut root, &mut app, 'b');
+        answer(&mut root, &mut app, "/a");
+        press(&mut root, &mut app, 'b');
+        assert!(root.listing.is_none());
+        assert_eq!(app.state().current_path(), "/a");
+    }
+
+    #[tokio::test]
+    async fn a_new_folder_after_going_back_drops_the_way_forward() {
+        let mut app = test_app_at("/a", &["x"]);
+        let mut root = test_root(&app);
+        visit(&mut root, &mut app, "/b");
+        press(&mut root, &mut app, 'b');
+        answer(&mut root, &mut app, "/a");
+
+        visit(&mut root, &mut app, "/c");
+        press(&mut root, &mut app, 'f');
+        assert!(root.listing.is_none(), "/b is no longer ahead");
+
+        press(&mut root, &mut app, 'b');
+        answer(&mut root, &mut app, "/a");
+    }
+
+    #[tokio::test]
+    async fn two_quick_steps_back_go_two_folders_back() {
+        let mut app = test_app_at("/a", &["x"]);
+        let mut root = test_root(&app);
+        visit(&mut root, &mut app, "/b");
+        visit(&mut root, &mut app, "/c");
+
+        // The second `b` comes before the first listing has arrived
+        press(&mut root, &mut app, 'b');
+        press(&mut root, &mut app, 'b');
+        answer(&mut root, &mut app, "/a");
+
+        press(&mut root, &mut app, 'f');
+        answer(&mut root, &mut app, "/b");
+    }
+
+    #[tokio::test]
+    async fn a_failed_history_step_leaves_the_user_where_they_were() {
+        let mut app = test_app_at("/a", &["x"]);
+        let mut root = test_root(&app);
+        visit(&mut root, &mut app, "/b");
+
+        press(&mut root, &mut app, 'b');
+        let failed = Action::FolderListFailed {
+            request: listing(&root),
+            path: "/a".to_string(),
+            message: "Could not open /a: permission denied".to_string(),
+        };
+        root.process_action(failed, &mut app).unwrap();
+
+        assert_eq!(app.state().current_path(), "/b");
+        let text = screen_text(&mut root, &app);
+        assert!(text.contains("│ /b "), "{text}");
+        assert!(text.contains("permission denied"), "{text}");
+
+        // The step was not taken, so it can be tried again
+        press(&mut root, &mut app, 'b');
+        answer(&mut root, &mut app, "/a");
     }
 }
