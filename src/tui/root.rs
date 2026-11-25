@@ -439,8 +439,16 @@ impl Root {
                 self.active_screen = ActiveScreen::Policy;
             }
 
-            // Quit
+            // `q`, from any screen. The main screen knows whether an edit
+            // would be lost; if so it asks, so that is the screen to show.
             Action::Quit => {
+                if let Some(next) = self.main_screen.update(action, &mut ctx)? {
+                    return self.process_action(next, app);
+                }
+                self.active_screen = ActiveScreen::Main;
+            }
+
+            Action::QuitNow => {
                 self.should_quit = true;
             }
 
@@ -1547,5 +1555,48 @@ mod tests {
         root.process_action(Action::ShowPolicyScreen, &mut app)
             .unwrap();
         assert!(screen_text(&mut root, &app).contains("permission denied"));
+    }
+
+    #[tokio::test]
+    async fn q_asks_before_losing_an_edit_and_ctrl_c_does_not() {
+        let edit_with_a_change = |root: &mut Root, app: &mut App| {
+            root.process_action(view("/a"), app).unwrap();
+            root.process_action(loaded("/a", "field_a"), app).unwrap();
+            root.process_action(Action::EditSecret, app).unwrap();
+            for c in ['a', 'k'] {
+                press(root, app, c);
+            }
+            let enter = KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            );
+            root.handle_key_event(enter, app).unwrap();
+            root.handle_key_event(enter, app).unwrap();
+        };
+
+        // `q`, wherever it is pressed, asks on the main screen
+        let mut app = test_app();
+        let mut root = test_root(&app);
+        edit_with_a_change(&mut root, &mut app);
+        root.process_action(Action::ShowLogScreen, &mut app)
+            .unwrap();
+        root.process_action(Action::Quit, &mut app).unwrap();
+        assert!(!root.should_quit());
+        assert!(screen_text(&mut root, &app).contains(" Unsaved changes "));
+        press(&mut root, &mut app, 'y');
+        assert!(root.should_quit());
+
+        // Ctrl+C quits at once
+        let mut app = test_app();
+        let mut root = test_root(&app);
+        edit_with_a_change(&mut root, &mut app);
+        root.process_action(Action::QuitNow, &mut app).unwrap();
+        assert!(root.should_quit());
+
+        // And `q` with nothing to lose does too
+        let mut app = test_app();
+        let mut root = test_root(&app);
+        root.process_action(Action::Quit, &mut app).unwrap();
+        assert!(root.should_quit());
     }
 }

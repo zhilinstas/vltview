@@ -219,7 +219,7 @@ impl Tui {
         // Global quit with Ctrl+C (works from anywhere)
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
             self.root
-                .process_action(action::Action::Quit, &mut self.app)?;
+                .process_action(action::Action::QuitNow, &mut self.app)?;
             return Ok(());
         }
 

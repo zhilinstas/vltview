@@ -639,7 +639,8 @@ impl Component for EditViewComponent {
                     // refused rather than sent.
                     (KeyCode::Char('s'), KeyModifiers::CONTROL) => self.save(),
 
-                    // Cancel/Exit
+                    // Close the editor. The main screen asks first if there
+                    // are unsaved changes.
                     (KeyCode::Esc, KeyModifiers::NONE) => Some(Action::CancelEdit),
 
                     _ => None,
@@ -715,21 +716,8 @@ impl Component for EditViewComponent {
         Ok(None)
     }
 
-    fn update(&mut self, action: Action, _ctx: &mut ComponentContext) -> Result<Option<Action>> {
-        match action {
-            // Cancel edit
-            Action::CancelEdit => {
-                if self.is_editing() {
-                    self.cancel_edit();
-                    Ok(None)
-                } else {
-                    // In Navigate mode, this means close the edit view
-                    Ok(Some(Action::ScreenBack))
-                }
-            }
-
-            _ => Ok(None),
-        }
+    fn update(&mut self, _action: Action, _ctx: &mut ComponentContext) -> Result<Option<Action>> {
+        Ok(None)
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &RenderContext) {

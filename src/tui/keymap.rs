@@ -37,6 +37,10 @@ pub enum Context {
     CreatePrompt,
     /// Question before deleting a secret
     DeleteConfirm,
+    /// Question before closing an editor that has unsaved changes
+    DiscardConfirm,
+    /// Question before quitting while an editor has unsaved changes
+    QuitConfirm,
     /// An error message over the main screen
     Notice,
     /// Policy list
@@ -49,7 +53,7 @@ pub enum Context {
 
 impl Context {
     /// Every context, in the order the help overlay lists them
-    pub const ALL: [Context; 16] = [
+    pub const ALL: [Context; 18] = [
         Context::Global,
         Context::Navigation,
         Context::Filter,
@@ -62,6 +66,8 @@ impl Context {
         Context::FieldDeleteConfirm,
         Context::CreatePrompt,
         Context::DeleteConfirm,
+        Context::DiscardConfirm,
+        Context::QuitConfirm,
         Context::Notice,
         Context::Policies,
         Context::PolicyContent,
@@ -83,6 +89,8 @@ impl Context {
             Context::FieldDeleteConfirm => "Deleting a field",
             Context::CreatePrompt => "New secret name",
             Context::DeleteConfirm => "Deleting a secret",
+            Context::DiscardConfirm => "Closing an editor with unsaved changes",
+            Context::QuitConfirm => "Quitting with unsaved changes",
             Context::Notice => "An error message",
             Context::Policies => "Policy list",
             Context::PolicyContent => "Policy content",
@@ -120,8 +128,8 @@ const GLOBAL: &[Binding] = &[
     bind("p", "policies", "Open the policy screen", 7),
     bind("~", "logs", "Open the application logs", 8),
     bind("?", "help", "Show this help", 2),
-    bind("q", "quit", "Quit", 3),
-    bind("Ctrl+c", "quit", "Quit from anywhere", 0),
+    bind("q", "quit", "Quit (asks if an edit has changes)", 3),
+    bind("Ctrl+c", "quit", "Quit from anywhere, at once", 0),
 ];
 
 const NAVIGATION: &[Binding] = &[
@@ -201,7 +209,12 @@ const EDIT: &[Binding] = &[
     bind("a", "add", "Add a field", 2),
     bind("d", "delete", "Delete the selected field", 3),
     bind("Ctrl+s", "save", "Save the secret to Vault", 1),
-    bind("Esc", "cancel", "Close the editor without saving", 1),
+    bind(
+        "Esc",
+        "cancel",
+        "Close the editor (asks if there are changes)",
+        1,
+    ),
     bind("Tab", "pane", "Switch to the list; the edit stays open", 4),
 ];
 
@@ -246,6 +259,16 @@ const FIELD_DELETE_CONFIRM: &[Binding] = &[
 const DELETE_CONFIRM: &[Binding] = &[
     bind("y", "delete", "Delete every version and the metadata", 1),
     bind("n/Esc", "cancel", "Keep the secret", 1),
+];
+
+const DISCARD_CONFIRM: &[Binding] = &[
+    bind("y", "discard", "Close the editor and lose the changes", 1),
+    bind("n/Esc", "keep editing", "Go back to the editor", 1),
+];
+
+const QUIT_CONFIRM: &[Binding] = &[
+    bind("y", "quit", "Quit and lose the unsaved changes", 1),
+    bind("n/Esc", "stay", "Go back to where you were", 1),
 ];
 
 const NOTICE: &[Binding] = &[bind("Esc", "close", "Close the message (also Enter)", 1)];
@@ -297,6 +320,8 @@ pub fn bindings(context: Context) -> &'static [Binding] {
         Context::FieldDeleteConfirm => FIELD_DELETE_CONFIRM,
         Context::CreatePrompt => CREATE_PROMPT,
         Context::DeleteConfirm => DELETE_CONFIRM,
+        Context::DiscardConfirm => DISCARD_CONFIRM,
+        Context::QuitConfirm => QUIT_CONFIRM,
         Context::Notice => NOTICE,
         Context::Policies => POLICIES,
         Context::PolicyContent => POLICY_CONTENT,

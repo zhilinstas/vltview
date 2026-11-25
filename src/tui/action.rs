@@ -19,8 +19,11 @@ pub enum Action {
     /// Terminal resized
     Resize { width: u16, height: u16 },
 
-    /// Quit the application
+    /// `q`: quit, after asking if an edit with unsaved changes is open
     Quit,
+
+    /// Quit at once (Ctrl+C, or `q` once it is confirmed)
+    QuitNow,
 
     /// Suspend terminal (Ctrl+Z support)
     Suspend,
@@ -216,7 +219,8 @@ pub enum Action {
     // ═══════════════════════════════════════════════════════════════
     // EDIT VIEW ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Esc in the edit view: close it, unless a field is being typed
+    /// Esc in the edit view's field list: close the editor, after asking
+    /// if it has unsaved changes
     CancelEdit,
 
     // ═══════════════════════════════════════════════════════════════

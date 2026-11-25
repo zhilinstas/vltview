@@ -27,6 +27,15 @@ struct DeleteTarget {
     versions: Option<usize>,
 }
 
+/// What is waiting for the user to agree that unsaved changes may be lost
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Discard {
+    /// Esc in the editor
+    CloseEditor,
+    /// `q` while an editor with changes is open
+    Quit,
+}
+
 /// Main screen component with split view (navigation + content)
 ///
 /// This is the primary screen of VltView, showing:
@@ -75,6 +84,9 @@ pub struct MainScreen {
     /// Delete confirmation, while it is open
     delete_confirmation: Option<DeleteTarget>,
 
+    /// Question about unsaved changes, while it is open
+    discard_prompt: Option<Discard>,
+
     /// Selected secret that is not on screen yet
     loading_secret: Option<String>,
 
@@ -105,6 +117,7 @@ impl MainScreen {
             notices: VecDeque::new(),
             is_loading: false,
             delete_confirmation: None,
+            discard_prompt: None,
             loading_secret: None,
             focus_on_load: None,
         }
@@ -115,10 +128,50 @@ impl MainScreen {
         self.detail_view.is_some() || self.edit_view.is_some()
     }
 
+    /// Whether an editor is open with changes that have not been saved
+    fn has_unsaved_edit(&self) -> bool {
+        self.edit_view
+            .as_ref()
+            .is_some_and(|edit| edit.has_unsaved_changes())
+    }
+
+    /// Close the editor; what was underneath is shown again
+    fn close_editor(&mut self) {
+        self.edit_view = None;
+        self.focused_pane = if self.detail_view.is_some() {
+            FocusedPane::Content
+        } else {
+            FocusedPane::Navigation
+        };
+    }
+
+    /// Keys while the question about unsaved changes is open
+    fn handle_discard_prompt(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Char('y') => match self.discard_prompt.take()? {
+                Discard::CloseEditor => {
+                    self.close_editor();
+                    None
+                }
+                Discard::Quit => Some(Action::QuitNow),
+            },
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.discard_prompt = None;
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// The keys that work right now, for the footer
     fn footer_contexts(&self) -> Vec<Context> {
         if !self.notices.is_empty() {
             return vec![Context::Notice];
+        }
+        match self.discard_prompt {
+            Some(Discard::CloseEditor) => return vec![Context::DiscardConfirm],
+            Some(Discard::Quit) => return vec![Context::QuitConfirm],
+            None => {}
         }
         if self.delete_confirmation.is_some() {
             return vec![Context::DeleteConfirm];
@@ -453,6 +506,73 @@ impl MainScreen {
         );
     }
 
+    /// Render the question about unsaved changes. Fixed size, like the
+    /// other dialogs, so all of it is on screen at 80x24.
+    fn render_discard_prompt(frame: &mut Frame, area: Rect, prompt: Discard, path: &str) {
+        let width = 62;
+        let inner_width = (width.min(area.width) as usize).saturating_sub(4);
+        let path_lines = wrap(path, inner_width);
+        let path_lines = &path_lines[..path_lines.len().min(3)];
+
+        let (consequence, yes, no) = match prompt {
+            Discard::CloseEditor => (
+                "Closing the editor loses them.",
+                " discard   ",
+                " keep editing",
+            ),
+            Discard::Quit => ("Quitting loses them.", " quit   ", " stay"),
+        };
+        let key_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+
+        let mut text = vec![Line::from("")];
+        text.extend(path_lines.iter().map(|line| {
+            Line::from(Span::styled(
+                line.clone(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        }));
+        text.extend([
+            Line::from(""),
+            Line::from("The changes to this secret have not been saved."),
+            Line::from(Span::styled(
+                consequence,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("y", key_style),
+                Span::raw(yes),
+                Span::styled("n/Esc", key_style),
+                Span::raw(no),
+            ]),
+        ]);
+
+        let popup = centered(width, text.len() as u16 + 2, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(Span::styled(
+                " Unsaved changes ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .block(block),
+            popup,
+        );
+    }
+
     /// Render delete confirmation dialog.
     ///
     /// The size is fixed, so the path and the warning are on screen whatever
@@ -560,6 +680,11 @@ impl Component for MainScreen {
         if !self.notices.is_empty() {
             self.handle_notice(key);
             return Ok(None);
+        }
+
+        // So is the question about unsaved changes
+        if self.discard_prompt.is_some() {
+            return Ok(self.handle_discard_prompt(key));
         }
 
         // Handle delete confirmation first
@@ -675,7 +800,10 @@ impl Component for MainScreen {
     fn handle_paste(&mut self, text: &str, ctx: &ComponentContext) -> Result<Option<Action>> {
         // Pasted text goes into the text input that has focus, if there is
         // one. Anywhere else it is dropped: it must never run as commands.
-        if self.delete_confirmation.is_some() || !self.notices.is_empty() {
+        if self.delete_confirmation.is_some()
+            || self.discard_prompt.is_some()
+            || !self.notices.is_empty()
+        {
             return Ok(None);
         }
 
@@ -871,18 +999,22 @@ impl Component for MainScreen {
                 }
             }
 
-            // Cancel edit is handled by EditView itself
-            // If EditView is not editing, it emits ScreenBack to close
+            // Esc in the editor's field list. Changes are not dropped by
+            // one key: with unsaved changes the user is asked first.
             Action::CancelEdit => {
-                if let Some(view) = &mut self.edit_view
-                    && let Some(Action::ScreenBack) = view.update(Action::CancelEdit, ctx)?
-                {
-                    self.edit_view = None;
-                    self.focused_pane = if self.detail_view.is_some() {
-                        FocusedPane::Content
-                    } else {
-                        FocusedPane::Navigation
-                    };
+                if self.has_unsaved_edit() {
+                    self.discard_prompt = Some(Discard::CloseEditor);
+                } else if self.edit_view.is_some() {
+                    self.close_editor();
+                }
+            }
+
+            // `q`. The same goes for quitting with an edit open.
+            Action::Quit => {
+                if self.has_unsaved_edit() {
+                    self.discard_prompt = Some(Discard::Quit);
+                } else {
+                    return Ok(Some(Action::QuitNow));
                 }
             }
 
@@ -955,8 +1087,14 @@ impl Component for MainScreen {
             }
 
             Action::ShowCreateSecretInput => {
-                self.create_input = Some(name_prompt());
-                self.create_error = None;
+                // A new secret takes the editor's place, so it must not be
+                // a way to lose an edit without being asked
+                if self.has_unsaved_edit() {
+                    self.status_message = Some("Save or close the open edit first".to_string());
+                } else {
+                    self.create_input = Some(name_prompt());
+                    self.create_error = None;
+                }
             }
 
             Action::HideCreateSecretInput => {
@@ -1069,6 +1207,10 @@ impl Component for MainScreen {
             Self::render_delete_confirmation(frame, area, target);
         }
 
+        if let (Some(prompt), Some(edit)) = (self.discard_prompt, &self.edit_view) {
+            Self::render_discard_prompt(frame, area, prompt, edit.path());
+        }
+
         // An error message is on top of everything
         if let Some(message) = self.notices.front() {
             Self::render_notice(frame, area, message, self.notices.len() - 1);
@@ -1080,6 +1222,7 @@ impl Component for MainScreen {
         // and while an error message is shown
         self.create_input.is_some()
             || self.delete_confirmation.is_some()
+            || self.discard_prompt.is_some()
             || !self.notices.is_empty()
     }
 }
@@ -1178,6 +1321,34 @@ mod tests {
             version,
             data: secret(value),
         }
+    }
+
+    /// Press a key and apply the action it leads to, as `Root` does for the
+    /// actions that stay on the main screen. Returns what is left for
+    /// `Root`.
+    fn press(screen: &mut MainScreen, ctx: &mut ComponentContext, code: KeyCode) -> Option<Action> {
+        match screen.handle_key(key(code), ctx).unwrap() {
+            Some(action @ (Action::CancelEdit | Action::Quit)) => {
+                screen.update(action, ctx).unwrap()
+            }
+            other => other,
+        }
+    }
+
+    /// A screen showing /a in the editor with one value changed
+    fn edit_with_a_change(screen: &mut MainScreen, ctx: &mut ComponentContext) {
+        screen
+            .update(loaded("/a", json!({"host": "db"})), ctx)
+            .unwrap();
+        screen.update(Action::EditSecret, ctx).unwrap();
+        press(screen, ctx, KeyCode::Enter);
+        press(screen, ctx, KeyCode::Char('2'));
+        press(screen, ctx, KeyCode::Enter);
+    }
+
+    fn edited(screen: &MainScreen) -> SecretData {
+        let edit = screen.edit_view.as_ref().expect("the editor is open");
+        edit.secret_data().unwrap()
     }
 
     /// Run `body` with a screen and the context components expect
@@ -1567,8 +1738,8 @@ mod tests {
             assert!(!screen_text.contains("field_a"), "{screen_text}");
 
             // Esc twice: out of the first field, then out of the editor
-            screen.update(Action::CancelEdit, ctx).unwrap();
-            screen.update(Action::CancelEdit, ctx).unwrap();
+            press(screen, ctx, KeyCode::Esc);
+            press(screen, ctx, KeyCode::Esc);
 
             assert!(screen.edit_view.is_none());
             let screen_text = text(screen, ctx, 80, 24);
@@ -2104,6 +2275,151 @@ mod tests {
                 ),
                 "{save:?}"
             );
+        });
+    }
+
+    #[test]
+    fn escape_with_unsaved_changes_asks_and_y_discards_them() {
+        // Regression: one Esc in the editor threw the changes away.
+        with_screen(|screen, ctx| {
+            edit_with_a_change(screen, ctx);
+
+            assert!(press(screen, ctx, KeyCode::Esc).is_none());
+            assert!(screen.edit_view.is_some(), "not closed without asking");
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(screen_text.contains(" Unsaved changes "), "{screen_text}");
+            assert!(
+                screen_text.contains("The changes to this secret have not been saved."),
+                "{screen_text}"
+            );
+            let footer = rows(screen, ctx, 80, 24).pop().unwrap();
+            assert!(footer.contains("y discard"), "{footer}");
+            assert!(footer.contains("n/Esc keep editing"), "{footer}");
+
+            press(screen, ctx, KeyCode::Char('y'));
+            assert!(screen.edit_view.is_none());
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(!screen_text.contains("Unsaved changes"), "{screen_text}");
+            assert!(screen_text.contains("host"), "{screen_text}");
+        });
+    }
+
+    #[test]
+    fn declining_to_discard_keeps_every_change() {
+        for decline in [KeyCode::Char('n'), KeyCode::Esc] {
+            with_screen(|screen, ctx| {
+                edit_with_a_change(screen, ctx);
+                press(screen, ctx, KeyCode::Esc);
+
+                // Other keys do nothing while the question is open
+                press(screen, ctx, KeyCode::Enter);
+                press(screen, ctx, KeyCode::Char('q'));
+                assert!(text(screen, ctx, 80, 24).contains(" Unsaved changes "));
+
+                press(screen, ctx, decline);
+                assert!(!text(screen, ctx, 80, 24).contains(" Unsaved changes "));
+                assert_eq!(edited(screen), secret(json!({"host": "db2"})));
+                assert_eq!(screen.focused_pane, FocusedPane::Content);
+            });
+        }
+    }
+
+    #[test]
+    fn escape_without_changes_closes_the_editor_at_once() {
+        with_screen(|screen, ctx| {
+            screen
+                .update(loaded("/a", json!({"host": "db"})), ctx)
+                .unwrap();
+            screen.update(Action::EditSecret, ctx).unwrap();
+
+            press(screen, ctx, KeyCode::Esc);
+            assert!(screen.edit_view.is_none());
+            assert!(!text(screen, ctx, 80, 24).contains("Unsaved changes"));
+        });
+    }
+
+    #[test]
+    fn quitting_from_the_list_with_unsaved_changes_asks_first() {
+        // Regression: Tab to the list and `q` quit with the edit open.
+        with_screen(|screen, ctx| {
+            edit_with_a_change(screen, ctx);
+            press(screen, ctx, KeyCode::Tab);
+            assert_eq!(screen.focused_pane, FocusedPane::Navigation);
+
+            let left_for_root = press(screen, ctx, KeyCode::Char('q'));
+            assert!(left_for_root.is_none(), "{left_for_root:?}");
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(screen_text.contains(" Unsaved changes "), "{screen_text}");
+            let footer = rows(screen, ctx, 80, 24).pop().unwrap();
+            assert!(footer.contains("y quit"), "{footer}");
+            assert!(footer.contains("n/Esc stay"), "{footer}");
+
+            // Declined: back in the list, with the edit as it was
+            press(screen, ctx, KeyCode::Char('n'));
+            assert_eq!(screen.focused_pane, FocusedPane::Navigation);
+            assert_eq!(edited(screen), secret(json!({"host": "db2"})));
+
+            // Confirmed: quit
+            press(screen, ctx, KeyCode::Char('q'));
+            let left_for_root = press(screen, ctx, KeyCode::Char('y'));
+            assert!(
+                matches!(left_for_root, Some(Action::QuitNow)),
+                "{left_for_root:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn quitting_with_nothing_unsaved_does_not_ask() {
+        with_screen(|screen, ctx| {
+            // No editor
+            let left_for_root = press(screen, ctx, KeyCode::Char('q'));
+            assert!(matches!(left_for_root, Some(Action::QuitNow)));
+
+            // An editor with no changes
+            screen
+                .update(loaded("/a", json!({"host": "db"})), ctx)
+                .unwrap();
+            screen.update(Action::EditSecret, ctx).unwrap();
+            press(screen, ctx, KeyCode::Tab);
+            let left_for_root = press(screen, ctx, KeyCode::Char('q'));
+            assert!(matches!(left_for_root, Some(Action::QuitNow)));
+        });
+    }
+
+    #[test]
+    fn an_edit_of_an_old_version_counts_as_changed_from_the_start() {
+        with_screen(|screen, ctx| {
+            screen.update(loaded_with_versions("/b", 7), ctx).unwrap();
+            ask_for_version(screen, ctx, 2, KeyCode::Char('n'));
+            let for_edit = Action::VersionLoadedForEdit {
+                path: "/b".to_string(),
+                version: 2,
+                data: secret(json!({"k": "older"})),
+            };
+            screen.update(for_edit, ctx).unwrap();
+
+            press(screen, ctx, KeyCode::Esc);
+            assert!(screen.edit_view.is_some());
+            assert!(text(screen, ctx, 80, 24).contains(" Unsaved changes "));
+        });
+    }
+
+    #[test]
+    fn a_new_secret_cannot_replace_an_edit_with_unsaved_changes() {
+        // The other way to lose an edit: Tab to the list, `n`, a name, Enter
+        with_screen(|screen, ctx| {
+            edit_with_a_change(screen, ctx);
+            press(screen, ctx, KeyCode::Tab);
+
+            screen.update(Action::ShowCreateSecretInput, ctx).unwrap();
+            assert!(screen.create_input.is_none());
+            let footer = rows(screen, ctx, 80, 24).pop().unwrap();
+            assert!(
+                footer.contains("Save or close the open edit first"),
+                "{footer}"
+            );
+            assert_eq!(edited(screen), secret(json!({"host": "db2"})));
         });
     }
 }

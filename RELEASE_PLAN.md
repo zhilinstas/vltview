@@ -97,8 +97,9 @@ Behaviour changes to put in the changelog:
       fixed with step 4. Fixed: a value without a key and two fields with
       one key are refused in the editor, an empty row is left out, and a
       new secret with no named field is not sent
-- [ ] Unsaved edits are discarded without confirmation (`has_changes` is never
-      read)
+- [x] Unsaved edits are discarded without confirmation (`has_changes` is never
+      read). Fixed: Esc in the editor, and `q` with an edit open, ask first
+      when there are unsaved changes; Ctrl+C still quits at once
 - [x] Policy screen: errors land on the main screen, viewport height is
       hard-coded to 30, the list does not scroll, `y` (copy) is a no-op.
       Fixed with step 4; list scrolling has no test
@@ -303,9 +304,8 @@ How it was done, where that is not obvious from the item:
   dispatch is still in each component's `handle_key`, so a changed binding
   has to be changed in both places.
 - U16: masking itself is unchanged (see step 3).
-- U17: the discard confirmation is still open (step 3). `q` no longer quits
-  from inside the editor, but Esc there, and `q` from the list with an edit
-  open, still drop the changes without asking.
+- U17: `q` no longer quits from inside the editor. The discard confirmation
+  came later, with step 3.
 
 ### Feature candidates (not scheduled)
 
