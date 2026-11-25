@@ -31,9 +31,11 @@ pub enum Context {
     Edit,
     /// Edit view, typing a key or a value
     EditField,
+    /// Edit view asking whether to delete a field
+    FieldDeleteConfirm,
     /// Name prompt for a new secret
     CreatePrompt,
-    /// Delete confirmation
+    /// Question before deleting a secret
     DeleteConfirm,
     /// Policy list
     Policies,
@@ -45,7 +47,7 @@ pub enum Context {
 
 impl Context {
     /// Every context, in the order the help overlay lists them
-    pub const ALL: [Context; 14] = [
+    pub const ALL: [Context; 15] = [
         Context::Global,
         Context::Navigation,
         Context::Filter,
@@ -55,6 +57,7 @@ impl Context {
         Context::Versions,
         Context::Edit,
         Context::EditField,
+        Context::FieldDeleteConfirm,
         Context::CreatePrompt,
         Context::DeleteConfirm,
         Context::Policies,
@@ -74,8 +77,9 @@ impl Context {
             Context::ValueViewer => "Value viewer",
             Context::Edit => "Editing a secret",
             Context::EditField => "Editing a key or value",
+            Context::FieldDeleteConfirm => "Deleting a field",
             Context::CreatePrompt => "New secret name",
-            Context::DeleteConfirm => "Delete confirmation",
+            Context::DeleteConfirm => "Deleting a secret",
             Context::Policies => "Policy list",
             Context::PolicyContent => "Policy content",
             Context::Logs => "Logs",
@@ -230,6 +234,11 @@ const CREATE_PROMPT: &[Binding] = &[
     bind("Esc", "cancel", "Cancel", 1),
 ];
 
+const FIELD_DELETE_CONFIRM: &[Binding] = &[
+    bind("y", "delete", "Remove the field; Vault changes on save", 1),
+    bind("n/Esc", "cancel", "Keep the field", 1),
+];
+
 const DELETE_CONFIRM: &[Binding] = &[
     bind("y", "delete", "Delete every version and the metadata", 1),
     bind("n/Esc", "cancel", "Keep the secret", 1),
@@ -279,6 +288,7 @@ pub fn bindings(context: Context) -> &'static [Binding] {
         Context::ValueViewer => VALUE_VIEWER,
         Context::Edit => EDIT,
         Context::EditField => EDIT_FIELD,
+        Context::FieldDeleteConfirm => FIELD_DELETE_CONFIRM,
         Context::CreatePrompt => CREATE_PROMPT,
         Context::DeleteConfirm => DELETE_CONFIRM,
         Context::Policies => POLICIES,

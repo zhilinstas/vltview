@@ -120,7 +120,9 @@ impl MainScreen {
             FocusedPane::Navigation => vec![Context::Navigation, Context::Global],
             FocusedPane::Content => {
                 if let Some(edit) = &self.edit_view {
-                    if edit.is_editing() {
+                    if edit.has_delete_confirmation() {
+                        vec![Context::FieldDeleteConfirm]
+                    } else if edit.is_editing() {
                         vec![Context::EditField]
                     } else {
                         vec![Context::Edit]
@@ -645,6 +647,8 @@ impl Component for MainScreen {
                 if !already_shown {
                     self.detail_view = None;
                     self.loading_secret = secret;
+                    // An error belongs to what was selected when it happened
+                    self.error_message = None;
                     // Nothing left to have focus on
                     if self.edit_view.is_none() {
                         self.focused_pane = FocusedPane::Navigation;
@@ -844,9 +848,9 @@ impl Component for MainScreen {
 
             // Create secret
             Action::CreateSecret { name } => {
+                // The secret under the cursor stays underneath, as it does
+                // for an edit: the cursor has not moved, so Esc returns to it
                 self.edit_view = Some(EditViewComponent::new_secret(name));
-                self.detail_view = None;
-                self.loading_secret = None;
                 self.focused_pane = FocusedPane::Content;
             }
 
@@ -1312,6 +1316,67 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_load_leaves_the_screen_when_the_cursor_moves_on() {
+        // Regression: the error for one secret stayed in the pane under the
+        // next selection, in place of its "Loading" placeholder and over
+        // folders, until Esc.
+        let failed = |path: &str| Action::SecretLoadFailed {
+            path: path.to_string(),
+            message: "permission denied".to_string(),
+        };
+
+        with_screen(|screen, ctx| {
+            screen.update(selected(Some("/a")), ctx).unwrap();
+            screen.update(failed("/a"), ctx).unwrap();
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(screen_text.contains("permission denied"), "{screen_text}");
+
+            // On to another secret: its placeholder, not the old error
+            screen.update(selected(Some("/b")), ctx).unwrap();
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(!screen_text.contains("permission denied"), "{screen_text}");
+            assert!(screen_text.contains("Loading"), "{screen_text}");
+
+            // On to a folder: nothing of the failed secret is left
+            screen.update(failed("/b"), ctx).unwrap();
+            screen.update(selected(None), ctx).unwrap();
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(!screen_text.contains("permission denied"), "{screen_text}");
+        });
+    }
+
+    #[test]
+    fn cancelling_a_new_secret_shows_the_selected_secret_again() {
+        // Regression: starting a new secret threw away the secret under the
+        // cursor, so after Esc the pane was empty with the cursor still on
+        // it, and Enter waited for a load that was never requested.
+        with_screen(|screen, ctx| {
+            screen
+                .update(loaded("/a", json!({"field_a": "v"})), ctx)
+                .unwrap();
+            screen
+                .update(
+                    Action::CreateSecret {
+                        name: "/new".to_string(),
+                    },
+                    ctx,
+                )
+                .unwrap();
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(!screen_text.contains("field_a"), "{screen_text}");
+
+            // Esc twice: out of the first field, then out of the editor
+            screen.update(Action::CancelEdit, ctx).unwrap();
+            screen.update(Action::CancelEdit, ctx).unwrap();
+
+            assert!(screen.edit_view.is_none());
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(screen_text.contains("field_a"), "{screen_text}");
+            assert!(!screen_text.contains("Loading"), "{screen_text}");
+        });
+    }
+
+    #[test]
     fn reselecting_the_secret_on_screen_keeps_it() {
         with_screen(|screen, ctx| {
             screen
@@ -1484,6 +1549,26 @@ mod tests {
             screen.handle_key(key(KeyCode::Tab), ctx).unwrap();
             assert_eq!(screen.focused_pane, FocusedPane::Navigation);
             assert!(screen.edit_view.is_some());
+        });
+    }
+
+    #[test]
+    fn footer_follows_the_field_delete_question() {
+        // Regression: with the question open the footer went on offering
+        // the editor's keys, none of which did anything.
+        with_screen(|screen, ctx| {
+            screen
+                .update(loaded("/a", json!({"host": "db", "port": "1"})), ctx)
+                .unwrap();
+            screen.update(Action::EditSecret, ctx).unwrap();
+            screen.handle_key(key(KeyCode::Char('d')), ctx).unwrap();
+
+            let all_rows = rows(screen, ctx, 80, 24);
+            let footer = all_rows.last().unwrap();
+            assert!(footer.contains("y delete"), "{footer}");
+            assert!(footer.contains("cancel"), "{footer}");
+            assert!(!footer.contains("rename"), "{footer}");
+            assert!(!footer.contains("save"), "{footer}");
         });
     }
 

@@ -40,12 +40,12 @@ impl PolicyApi {
         // Acquire rate limit permit
         let _permit = self.rate_limiter.acquire().await?;
 
-        let url = format!("{}/v1/sys/policies/acl", self.base_url);
+        let url = vault_url(&self.base_url, &["v1", "sys", "policies", "acl"], "/")?;
 
         // Vault LIST endpoint requires the "LIST" HTTP method
         let mut req = self
             .client
-            .request(reqwest::Method::from_bytes(b"LIST")?, &url);
+            .request(reqwest::Method::from_bytes(b"LIST")?, url);
         req = self.auth.add_auth_header(req);
 
         if let Some(ns) = &self.namespace {
@@ -123,5 +123,40 @@ impl PolicyApi {
             let sanitized_error = sanitize_vault_error(status.as_u16(), &error_text);
             anyhow::bail!("{}", sanitized_error);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::Server;
+
+    fn api(base_url: String) -> PolicyApi {
+        PolicyApi::new(
+            Client::new(),
+            base_url,
+            AuthManager::new("test-token".to_string()),
+            None,
+            Arc::new(Semaphore::new(4)),
+        )
+    }
+
+    #[tokio::test]
+    async fn list_works_when_the_address_ends_in_a_slash() {
+        // The list URL was glued together with `format!` and relied on the
+        // config having trimmed the slash. It is built like every other URL.
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("LIST", "/v1/sys/policies/acl")
+            .match_header("X-Vault-Token", "test-token")
+            .with_status(200)
+            .with_body(r#"{"data":{"keys":["default","readonly"]}}"#)
+            .create_async()
+            .await;
+
+        let policies = api(format!("{}/", server.url())).list().await.unwrap();
+
+        mock.assert_async().await;
+        assert_eq!(policies, ["default", "readonly"]);
     }
 }

@@ -9,7 +9,8 @@ by reading and not yet triggered.
 
 ## Step 1: land the modernization
 
-Status: done locally, not committed, GitHub workflows not yet run.
+Status: committed on the branch `v0.3.0-groundwork`, the first of three
+commits in one pull request.
 
 - [x] `mise.toml` pins Rust 1.100.0 (rustfmt, clippy) and cargo-audit; CI and
       the release workflow install from it via `jdx/mise-action@v5`
@@ -17,7 +18,9 @@ Status: done locally, not committed, GitHub workflows not yet run.
 - [x] All dependencies at latest; `cargo audit` 22 vulnerabilities to 0
 - [x] `mise run ci` green locally (fmt, clippy `-D warnings`, 52 tests, audit)
 - [x] Release build verified for glibc and static musl
-- [ ] Commit as its own PR, separate from the fixes below
+- [x] Commit separately from the fixes below. Decided: one pull request with
+      one commit per step (modernization, blockers, UX) instead of one pull
+      request per step. Each commit passes `mise run ci` on its own
 - [ ] Confirm CI is green on GitHub for Ubuntu and macOS (first real run of
       the mise-based workflows; macOS builds are unverified)
 
@@ -31,7 +34,8 @@ Things to know about the upgrade:
 
 ## Step 2: release blockers
 
-Status: all nine fixed locally, not committed. Each has a regression test
+Status: all nine fixed and committed (second commit of the pull request).
+Each has a regression test
 (39 new tests, 91 total). The tests were confirmed to fail with the fix
 reverted, except B3, whose test uses the input that crashed the app live.
 B1 to B6, B8 and the save path of B9 were also re-tested against a live dev
@@ -111,10 +115,53 @@ Behaviour changes to put in the changelog:
 - [ ] Token `Zeroize` is nominal: the token is cloned into three
       `AuthManager`s and stays in `Config`
 
+### From the review of the pull request
+
+The three commits were reviewed against CLAUDE.md and against this plan
+before the pull request was opened.
+
+Fixed in the pull request (fourth commit), each with a test:
+
+- [x] The error from a failed load stayed in the pane after the cursor moved
+      on, over folders and in place of the next secret's "Loading"
+- [x] Starting a new secret threw away the secret under the cursor: after
+      Esc the pane was empty with the cursor still on it, and Enter waited
+      for a load that was never requested
+- [x] Enter confirmed deleting a field although the dialog offered only `y`,
+      and the footer went on showing the editor's keys while it was open
+- [x] The policy list URL was still built with `format!`
+
+Open:
+
+- [ ] A late policy result is applied whatever the user has moved to, and
+      opens the policy even after Esc
+- [ ] Version results are checked by path but not by version number, so two
+      requests for one secret resolve to whichever arrives last (from code)
+- [ ] Errors do not say what they are for: an error lands on whichever screen
+      or editor is open when it arrives
+- [ ] After a save the saved secret is loaded and shown even if the cursor
+      has left it
+- [ ] Creating `a/b` when `a/b` exists still writes a new version: the name
+      check only looks at the folder on screen (from code). A create should
+      be written with check-and-set 0 so Vault refuses it
+- [ ] Keys that work but are not in the key table: the help overlay's own
+      keys, `q` on the connecting screen, Esc to dismiss an error, Home/End
+      in the list, and PgUp/PgDn/g/G, `?` and `h` in the editor
+- [ ] Warnings can still be cut: the restore note beyond two lines, the name
+      prompt's error, and policy errors, which are not wrapped at all
+- [ ] CLAUDE.md asks for `ListState` and for no nested boxes; the navigation
+      pane and the log screen scroll by hand and the editor draws a box
+      inside the pane. Follow the rule or say what it really requires
+- [ ] Duplication to remove with step 5: the policy client repeats the
+      request code that `kv.rs` extracted; the edit view collects its fields
+      in two places and `save` uses the one that keeps empty keys; the TUI
+      calls the Vault client directly in two places instead of going through
+      `SecretService`
+
 ## Step 4: UX
 
-Status: U1 to U19 done locally, not committed. The suite went from 91 to
-164 tests, and `mise run ci` is green. Also driven in a real 80x24 terminal
+Status: U1 to U19 done and committed (third commit of the pull request).
+The suite went from 91 to 164 tests, and `mise run ci` is green. Also driven in a real 80x24 terminal
 (tmux) against the dev Vault: preview, filter, value viewer, history, create,
 edit, save, restore from an old version, delete, policies, logs and the
 startup screen. A burst of ten cursor steps made 2 reads (before, from code:
@@ -134,7 +181,8 @@ Changes to put in the changelog:
 - Deleting a secret is confirmed with `y` only.
 - Esc in the secret pane returns to the list; the pane always shows what the
   cursor is on.
-- `q`, `p`, `r` and `~` do nothing while the editor has focus.
+- `q`, `p` and `~` do nothing while the editor has focus, and `r` renames
+  the selected key instead of refreshing the list.
 
 Fixed on the way, because the same code was being rewritten (ticked in
 step 3): bracketed paste, list scrolling, the policy and log screen items,

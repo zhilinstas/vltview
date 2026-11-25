@@ -520,7 +520,8 @@ impl Component for EditViewComponent {
         // Delete confirmation dialog captures input
         if self.has_delete_confirmation() {
             match (key.code, key.modifiers) {
-                (KeyCode::Char('y'), KeyModifiers::NONE) | (KeyCode::Enter, KeyModifiers::NONE) => {
+                // Only `y`, as the dialog says and as for deleting a secret
+                (KeyCode::Char('y'), KeyModifiers::NONE) => {
                     self.confirm_delete_field();
                 }
                 (KeyCode::Char('n'), KeyModifiers::NONE) | (KeyCode::Esc, KeyModifiers::NONE) => {
@@ -1294,6 +1295,24 @@ mod tests {
             view.handle_key(key(KeyCode::Char('y')), ctx).unwrap();
             assert_eq!(view.fields.len(), 1);
             assert!(view.has_changes);
+        });
+    }
+
+    #[test]
+    fn only_y_confirms_a_field_delete() {
+        // Regression: Enter deleted the field too, while the dialog offered
+        // only `y`.
+        with_ctx(|ctx| {
+            let mut view = EditViewComponent::new(
+                "/secret/test".to_string(),
+                serde_json::from_value(json!({"host": "db", "port": "1"})).unwrap(),
+            );
+
+            view.handle_key(key(KeyCode::Char('d')), ctx).unwrap();
+            view.handle_key(key(KeyCode::Enter), ctx).unwrap();
+
+            assert_eq!(view.fields.len(), 2);
+            assert!(view.has_delete_confirmation(), "the question is still open");
         });
     }
 }
