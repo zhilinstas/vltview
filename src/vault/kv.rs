@@ -35,7 +35,7 @@ const KV_MOUNT: &str = "secret";
 pub struct KvEngine {
     client: Client,
     base_url: String,
-    auth: AuthManager,
+    auth: Arc<AuthManager>,
     namespace: Option<String>,
     rate_limiter: Arc<Semaphore>,
 }
@@ -45,7 +45,7 @@ impl KvEngine {
     pub fn new(
         client: Client,
         base_url: String,
-        auth: AuthManager,
+        auth: Arc<AuthManager>,
         namespace: Option<String>,
         rate_limiter: Arc<Semaphore>,
     ) -> Self {
@@ -238,7 +238,7 @@ mod tests {
         KvEngine::new(
             Client::new(),
             server.url(),
-            AuthManager::new("test-token".to_string()),
+            Arc::new(AuthManager::new("test-token".to_string().into())),
             None,
             Arc::new(Semaphore::new(4)),
         )

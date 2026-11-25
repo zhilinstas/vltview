@@ -892,7 +892,7 @@ mod tests {
     fn test_app() -> crate::app::App {
         let config = crate::config::Config {
             vault_addr: "http://127.0.0.1:1".to_string(),
-            vault_token: "test-token".to_string(),
+            vault_token: "test-token".to_string().into(),
             ..Default::default()
         };
         crate::app::App::new(config, "/".to_string()).unwrap()

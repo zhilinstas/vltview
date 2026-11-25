@@ -180,6 +180,29 @@ of them. The main ones:
 Moving the cursor onto a secret reads it from Vault once the cursor rests
 there, so scrolling through a folder does not read every secret on the way.
 
+## Security Notes
+
+### The token in memory
+
+VltView holds the Vault token in one place while it runs and overwrites that
+memory when it exits, also when the start fails. The token is never written
+to the application log or shown in debug output.
+
+That is a limit on how many long-lived copies there are, not a promise that
+the token cannot be found in the memory of the process:
+
+- The HTTP library copies the token into the headers of every request it
+  sends, and the TLS layer below it copies the request again. Those copies
+  are freed after the request and are not overwritten.
+- Wherever the token came from still has it. `VAULT_TOKEN` stays in the
+  environment of the process and `--vault-token` in its argument list for as
+  long as it runs (the argument list is also visible to other users in
+  `ps`). The text of the config file and of `~/.vault-token` is overwritten
+  after reading, but the argument and YAML parsers make short-lived copies
+  of their own that are not.
+- Nothing is overwritten if the process is killed by a signal, and memory
+  that the system swapped out or wrote to a core dump is out of reach.
+
 ## Development
 
 ### Toolchain

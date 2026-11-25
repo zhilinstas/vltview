@@ -114,7 +114,7 @@ HTTP client for Vault API using reqwest + Tokio.
 **Modules:**
 - `kv.rs`: KV v1 and v2 secret engine operations (list, read, write, delete)
 - `policy.rs`: Policy API (list, read policies)
-- `auth.rs`: Authentication manager (token-based, extensible for AppRole/LDAP)
+- `auth.rs`: `Token` (wiped on drop, not `Clone`) and `AuthManager`, its one owner
 - `request.rs`: Request builders with authentication headers
 - `response.rs`: Response parsing and error handling
 - `sanitize.rs`: Path sanitization for Vault API
@@ -426,6 +426,7 @@ Clipboard manager automatically clears copied secrets after 30 seconds:
 
 ### When Adding New Features
 - **Never log tokens or secret values** - use `audit_log::redact_secret_value()` if needed
+- **The token has one owner.** `vault::Token` is not `Clone` and is wiped on drop. It moves from where it was read into `Config`, and from there into the `AuthManager` when `VaultClient::new` takes the configuration; the client, `KvEngine` and `PolicyApi` share that `Arc<AuthManager>`. Do not copy `Token::expose()` into a `String`, do not make either type `Clone`, and do not keep a `Config` around. What this does not cover (copies inside reqwest, the environment, the argument list) is listed under "Security Notes" in the README; keep that list true
 - **Apply rate limiting** to new Vault API operations
 - **Sanitize all user input** going to Vault API
 - **Build request URLs with `sanitize::vault_url()`**, never `format!`. It percent-encodes each path segment, so a name containing `%2e%2e`, `?` or `#` cannot change which endpoint is called

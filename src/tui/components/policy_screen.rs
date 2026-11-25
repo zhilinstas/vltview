@@ -683,7 +683,7 @@ mod tests {
     fn with_screen(policies: &[&str], body: impl FnOnce(&mut PolicyScreen, &mut ComponentContext)) {
         let config = Config {
             vault_addr: "http://127.0.0.1:1".to_string(),
-            vault_token: "test-token".to_string(),
+            vault_token: "test-token".to_string().into(),
             ..Config::default()
         };
         let app = App::new(config, "/".to_string()).unwrap();

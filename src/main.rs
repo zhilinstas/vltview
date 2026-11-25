@@ -13,9 +13,10 @@ mod vault;
 
 use config::{Config, Environment};
 use tui::Tui;
+use vault::Token;
 
 /// VltView - Terminal UI for HashiCorp Vault
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(name = "vltview")]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -75,7 +76,7 @@ async fn main() -> Result<()> {
         cli.config.as_deref(),
         Environment::from_process(),
         cli.vault_addr,
-        cli.vault_token,
+        cli.vault_token.map(Token::from),
         cli.vault_namespace,
         cli.insecure,
     )?;

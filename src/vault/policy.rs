@@ -12,7 +12,7 @@ use super::sanitize::{sanitize_vault_error, vault_url};
 pub struct PolicyApi {
     client: Client,
     base_url: String,
-    auth: AuthManager,
+    auth: Arc<AuthManager>,
     namespace: Option<String>,
     rate_limiter: Arc<Semaphore>,
 }
@@ -22,7 +22,7 @@ impl PolicyApi {
     pub fn new(
         client: Client,
         base_url: String,
-        auth: AuthManager,
+        auth: Arc<AuthManager>,
         namespace: Option<String>,
         rate_limiter: Arc<Semaphore>,
     ) -> Self {
@@ -135,7 +135,7 @@ mod tests {
         PolicyApi::new(
             Client::new(),
             base_url,
-            AuthManager::new("test-token".to_string()),
+            Arc::new(AuthManager::new("test-token".to_string().into())),
             None,
             Arc::new(Semaphore::new(4)),
         )

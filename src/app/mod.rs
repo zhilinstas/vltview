@@ -41,7 +41,7 @@ impl App {
         let state = Arc::new(AppState::new(initial_path));
 
         // Initialize Vault client
-        let vault_client = Arc::new(VaultClient::new(config.clone())?);
+        let vault_client = Arc::new(VaultClient::new(config)?);
 
         // Initialize services
         let navigation = NavigationController::new(Arc::clone(&vault_client));

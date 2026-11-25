@@ -1,21 +1,28 @@
 use anyhow::{Context, Result, anyhow};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
+
+use crate::vault::Token;
 
 /// Application configuration
 ///
 /// Also the shape of the config file. Every key is optional there: what the
 /// file leaves out comes from the environment, the command line or the
 /// defaults.
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// Not `Clone`: the token in it has one owner. `VaultClient::new` takes the
+/// configuration and moves the token out, so no configuration with a token
+/// in it exists once there is a client.
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Vault server address
     pub vault_addr: String,
 
-    /// Vault authentication token
-    pub vault_token: String,
+    /// Vault authentication token (never shown by `Debug`, wiped on drop)
+    pub vault_token: Token,
 
     /// Vault namespace (Enterprise feature)
     pub vault_namespace: Option<String>,
@@ -55,7 +62,7 @@ pub struct Environment {
     pub vault_addr: Option<String>,
 
     /// `VAULT_TOKEN`
-    pub vault_token: Option<String>,
+    pub vault_token: Option<Token>,
 
     /// `VAULT_NAMESPACE`
     pub vault_namespace: Option<String>,
@@ -72,7 +79,7 @@ impl Environment {
     pub fn from_process() -> Self {
         Self {
             vault_addr: std::env::var("VAULT_ADDR").ok(),
-            vault_token: std::env::var("VAULT_TOKEN").ok(),
+            vault_token: std::env::var("VAULT_TOKEN").ok().map(Token::from),
             vault_namespace: std::env::var("VAULT_NAMESPACE").ok(),
             vault_skip_verify: std::env::var("VAULT_SKIP_VERIFY").ok(),
             home: std::env::home_dir(),
@@ -87,7 +94,7 @@ impl Config {
         config_path: Option<&Path>,
         env: Environment,
         vault_addr: Option<String>,
-        vault_token: Option<String>,
+        vault_token: Option<Token>,
         vault_namespace: Option<String>,
         insecure: bool,
     ) -> Result<Self> {
@@ -146,8 +153,11 @@ impl Config {
 
     /// Load configuration from YAML file
     fn load_from_file(path: &Path) -> Result<Self> {
-        let contents = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read config file {}", path.display()))?;
+        // The file may hold the token, so the text read from it is wiped
+        let contents = Zeroizing::new(
+            fs::read_to_string(path)
+                .with_context(|| format!("Failed to read config file {}", path.display()))?,
+        );
 
         Self::parse(&contents)
             .with_context(|| format!("Failed to parse config file {}", path.display()))
@@ -168,16 +178,16 @@ impl Config {
     }
 
     /// Load Vault token from cache (~/.vault-token)
-    fn load_token_cache(home: Option<&Path>) -> Result<String> {
+    fn load_token_cache(home: Option<&Path>) -> Result<Token> {
         let home = home.ok_or_else(|| anyhow!("Could not determine home directory"))?;
 
         let token_path = home.join(".vault-token");
 
         if token_path.exists() {
-            let token = fs::read_to_string(&token_path)
-                .context("Failed to read vault token cache")?
-                .trim()
-                .to_string();
+            let contents = Zeroizing::new(
+                fs::read_to_string(&token_path).context("Failed to read vault token cache")?,
+            );
+            let token = Token::from(contents.trim().to_string());
 
             if !token.is_empty() {
                 tracing::debug!("Loaded token from cache: ~/.vault-token");
@@ -194,7 +204,7 @@ impl Config {
     fn default_config() -> Self {
         Self {
             vault_addr: String::new(),
-            vault_token: String::new(),
+            vault_token: Token::default(),
             vault_namespace: None,
             insecure: false,
             timeout_secs: default_timeout(),
@@ -236,21 +246,6 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self::default_config()
-    }
-}
-
-// Custom Debug implementation to avoid leaking tokens in logs
-impl std::fmt::Debug for Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Config")
-            .field("vault_addr", &self.vault_addr)
-            .field("vault_token", &"***REDACTED***")
-            .field("vault_namespace", &self.vault_namespace)
-            .field("insecure", &self.insecure)
-            .field("timeout_secs", &self.timeout_secs)
-            .field("cache_enabled", &self.cache_enabled)
-            .field("cache_ttl", &self.cache_ttl)
-            .finish()
     }
 }
 
@@ -333,14 +328,14 @@ mod tests {
         // Regression: a file had to hold both, or it did not parse at all
         let home = TestHome::with_config("vault_addr: https://file.example\n");
         let env = Environment {
-            vault_token: Some("env-token".to_string()),
+            vault_token: Some("env-token".to_string().into()),
             ..home.env()
         };
 
         let config = load(env).unwrap();
 
         assert_eq!(config.vault_addr, "https://file.example");
-        assert_eq!(config.vault_token, "env-token");
+        assert_eq!(config.vault_token.expose(), "env-token");
         config.validate().unwrap();
     }
 
@@ -359,7 +354,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.vault_addr, "https://cli.example");
-        assert_eq!(config.vault_token, "file-token");
+        assert_eq!(config.vault_token.expose(), "file-token");
         config.validate().unwrap();
     }
 
@@ -370,7 +365,7 @@ mod tests {
         );
         let env = || Environment {
             vault_addr: Some("https://env.example".to_string()),
-            vault_token: Some("env-token".to_string()),
+            vault_token: Some("env-token".to_string().into()),
             ..home.env()
         };
 
@@ -386,7 +381,7 @@ mod tests {
 
         // Each value comes from the strongest source that has it
         assert_eq!(config.vault_addr, "https://cli.example");
-        assert_eq!(config.vault_token, "env-token");
+        assert_eq!(config.vault_token.expose(), "env-token");
         assert_eq!(config.vault_namespace.as_deref(), Some("file-ns"));
         assert_eq!(config.timeout_secs, 30);
         assert!(!config.insecure);
@@ -396,11 +391,11 @@ mod tests {
             None,
             env(),
             None,
-            Some("cli-token".to_string()),
+            Some("cli-token".to_string().into()),
             None,
             false,
         );
-        assert_eq!(config.unwrap().vault_token, "cli-token");
+        assert_eq!(config.unwrap().vault_token.expose(), "cli-token");
     }
 
     #[test]
@@ -439,13 +434,16 @@ mod tests {
         let home = TestHome::with_config("vault_addr: https://file.example\n");
         fs::write(home.0.join(".vault-token"), "cached-token\n").unwrap();
 
-        assert_eq!(load(home.env()).unwrap().vault_token, "cached-token");
+        assert_eq!(
+            load(home.env()).unwrap().vault_token.expose(),
+            "cached-token"
+        );
 
         let env = Environment {
-            vault_token: Some("env-token".to_string()),
+            vault_token: Some("env-token".to_string().into()),
             ..home.env()
         };
-        assert_eq!(load(env).unwrap().vault_token, "env-token");
+        assert_eq!(load(env).unwrap().vault_token.expose(), "env-token");
     }
 
     #[test]
@@ -517,6 +515,17 @@ mod tests {
     }
 
     #[test]
+    fn debug_output_never_shows_the_token() {
+        let home = TestHome::with_config("vault_token: hvs.SECRET\n");
+
+        let config = load(home.env()).unwrap();
+
+        let debug = format!("{config:?} {config:#?}");
+        assert!(!debug.contains("hvs.SECRET"), "{debug}");
+        assert!(debug.contains("***REDACTED***"), "{debug}");
+    }
+
+    #[test]
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.timeout_secs, 30);
@@ -543,7 +552,7 @@ mod tests {
     fn test_validate_success() {
         let config = Config {
             vault_addr: "https://vault.example.com".to_string(),
-            vault_token: "test-token".to_string(),
+            vault_token: "test-token".to_string().into(),
             ..Config::default()
         };
         assert!(config.validate().is_ok());

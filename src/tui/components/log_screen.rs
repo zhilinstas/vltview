@@ -350,7 +350,7 @@ mod tests {
         let app = crate::app::App::new(
             crate::config::Config {
                 vault_addr: "http://127.0.0.1:1".to_string(),
-                vault_token: "test-token".to_string(),
+                vault_token: "test-token".to_string().into(),
                 ..Default::default()
             },
             "/".to_string(),

@@ -861,7 +861,7 @@ mod tests {
     fn test_app() -> App {
         let config = Config {
             vault_addr: "http://127.0.0.1:1".to_string(),
-            vault_token: "test-token".to_string(),
+            vault_token: "test-token".to_string().into(),
             ..Config::default()
         };
         App::new(config, "/".to_string()).unwrap()
@@ -871,7 +871,7 @@ mod tests {
     fn test_app_at(path: &str, items: &[&str]) -> App {
         let config = Config {
             vault_addr: "http://127.0.0.1:1".to_string(),
-            vault_token: "test-token".to_string(),
+            vault_token: "test-token".to_string().into(),
             ..Config::default()
         };
         let app = App::new(config, path.to_string()).unwrap();
