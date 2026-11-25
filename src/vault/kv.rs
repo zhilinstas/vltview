@@ -62,6 +62,12 @@ impl KvEngine {
         }
     }
 
+    /// The owner of the token, for the test that nothing else holds it
+    #[cfg(test)]
+    pub(super) fn token_owner(&self) -> &Arc<AuthManager> {
+        &self.auth
+    }
+
     /// Add the token and namespace headers
     fn authorize(&self, req: RequestBuilder) -> RequestBuilder {
         authorize(req, &self.auth, self.namespace.as_deref())

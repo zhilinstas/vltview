@@ -243,8 +243,7 @@ impl Tui {
             }
         }
 
-        // Shutdown
-        self.app.shutdown().await?;
+        tracing::info!("Shutting down");
 
         Ok(())
     }

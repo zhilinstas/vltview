@@ -20,12 +20,11 @@ cargo-binstall = "1.26.2"
 description = "Check formatting"
 run = "cargo fmt --all -- --check"
 
-# `-A dead_code` is temporary: unused or half-wired items predate this gate
-# (unhandled Action variants, FocusState, the cache stub). Drop the flag once
-# they are wired up or deleted. Plain `cargo build` still reports them.
+# Unused code is an error like any other warning. Do not add an exemption or
+# an `allow` attribute for it: use the item or delete it.
 [tasks.clippy]
 description = "Lint with clippy, warnings are errors"
-run = "cargo clippy --all-targets --all-features --locked -- -D warnings -A dead_code"
+run = "cargo clippy --all-targets --all-features --locked -- -D warnings"
 
 [tasks.test]
 description = "Run the test suite"

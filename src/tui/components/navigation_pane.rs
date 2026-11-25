@@ -522,7 +522,6 @@ impl Component for NavigationPane {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::tui::context::FocusState;
     use tokio::sync::mpsc::unbounded_channel;
 
     fn test_app(path: &str, items: &[&str]) -> App {
@@ -561,9 +560,8 @@ mod tests {
         app: &App,
         body: impl FnOnce(&mut NavigationPane, &mut ComponentContext, Option<Action>),
     ) {
-        let focus = FocusState::new();
         let (tx, mut rx) = unbounded_channel();
-        let mut ctx = ComponentContext::new(app, &focus, &tx);
+        let mut ctx = ComponentContext::new(app, &tx);
         let mut pane = NavigationPane::new();
         pane.init(&mut ctx).unwrap();
         let announced = rx.try_recv().ok();

@@ -1133,11 +1133,6 @@ impl Component for MainScreen {
                 }
             }
 
-            Action::HideCreateSecretInput => {
-                self.create_input = None;
-                self.create_error = None;
-            }
-
             // Delete confirmation
             Action::ShowDeleteConfirmation { item_name } => {
                 let versions = self
@@ -1160,10 +1155,6 @@ impl Component for MainScreen {
                 self.status_message = Some(message);
             }
 
-            Action::ClearStatus => {
-                self.status_message = None;
-            }
-
             // A save that failed is shown inside the editor it came from,
             // so the fields stay on screen. If that editor is gone, or shows
             // another secret, the failure is still said, but over the screen.
@@ -1173,14 +1164,10 @@ impl Component for MainScreen {
             },
 
             // Errors that are not about what the content pane shows
-            Action::DeleteFailed { message, .. }
+            Action::DeleteFailed { message }
             | Action::FolderListFailed { message, .. }
             | Action::CopyFailed { message } => {
                 self.notices.push_back(message);
-            }
-
-            Action::ClearError => {
-                self.error_message = None;
             }
 
             Action::SetLoading { loading } => {
@@ -1218,22 +1205,12 @@ impl Component for MainScreen {
         .split(main_chunks[1]);
 
         // Render navigation pane (left)
-        let nav_ctx = RenderContext::new(
-            ctx.app,
-            ctx.focus,
-            self.focused_pane == FocusedPane::Navigation,
-            content_chunks[0],
-        );
+        let nav_ctx = RenderContext::new(ctx.app, self.focused_pane == FocusedPane::Navigation);
         self.navigation_pane
             .draw(frame, content_chunks[0], &nav_ctx);
 
         // Render content pane (right)
-        let content_ctx = RenderContext::new(
-            ctx.app,
-            ctx.focus,
-            self.focused_pane == FocusedPane::Content,
-            content_chunks[1],
-        );
+        let content_ctx = RenderContext::new(ctx.app, self.focused_pane == FocusedPane::Content);
         self.render_content_pane(frame, content_chunks[1], &content_ctx);
 
         self.render_footer(frame, main_chunks[2]);
@@ -1269,7 +1246,6 @@ mod tests {
     use crate::app::App;
     use crate::config::Config;
     use crate::tui::action::{SecretMetadata, SelectionSource, VersionInfo};
-    use crate::tui::context::FocusState;
     use crate::vault::SecretData;
     use ratatui::{Terminal, backend::TestBackend};
     use serde_json::json;
@@ -1390,9 +1366,8 @@ mod tests {
     /// Run `body` with a screen and the context components expect
     fn with_screen(body: impl FnOnce(&mut MainScreen, &mut ComponentContext)) {
         let app = test_app();
-        let focus = FocusState::new();
         let (tx, _rx) = unbounded_channel();
-        let mut ctx = ComponentContext::new(&app, &focus, &tx);
+        let mut ctx = ComponentContext::new(&app, &tx);
         let mut screen = MainScreen::new();
         body(&mut screen, &mut ctx);
     }
@@ -1408,7 +1383,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let render_ctx = RenderContext::new(ctx.app, ctx.focus, true, area);
+                let render_ctx = RenderContext::new(ctx.app, true);
                 screen.draw(frame, area, &render_ctx);
             })
             .unwrap();
@@ -2154,12 +2129,10 @@ mod tests {
                 message: "Could not save /other: Access denied".to_string(),
             },
             Action::DeleteFailed {
-                path: "/other".to_string(),
                 message: "Could not delete /other: Access denied".to_string(),
             },
             Action::FolderListFailed {
                 request: 1,
-                path: "/other".to_string(),
                 message: "Could not open /other: Access denied".to_string(),
             },
         ];
@@ -2198,7 +2171,6 @@ mod tests {
                            denied. The token's policies do not allow listing this folder.";
             let failed = Action::FolderListFailed {
                 request: 1,
-                path: "/team/payments/production/eu-west-1".to_string(),
                 message: message.to_string(),
             };
             screen.update(failed, ctx).unwrap();

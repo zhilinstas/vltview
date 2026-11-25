@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::RwLock;
 
 /// How many folders the history remembers
@@ -10,9 +9,6 @@ pub struct AppState {
     /// that the path, its items and the place in the history can only
     /// change together
     path: RwLock<PathState>,
-
-    /// Secret cache
-    cache: RwLock<CacheManager>,
 }
 
 impl AppState {
@@ -20,7 +16,6 @@ impl AppState {
     pub fn new(initial_path: String) -> Self {
         Self {
             path: RwLock::new(PathState::new(initial_path)),
-            cache: RwLock::new(CacheManager::new()),
         }
     }
 
@@ -84,16 +79,6 @@ impl AppState {
         true
     }
 
-    /// Invalidate cache for path
-    pub fn invalidate_cache(&self, path: &str) {
-        self.cache.write().unwrap().invalidate(path);
-    }
-
-    /// Clear all cache
-    pub fn clear_cache(&self) {
-        self.cache.write().unwrap().clear();
-    }
-
     /// Get current list items
     pub fn list_items(&self) -> Vec<String> {
         self.path.read().unwrap().items.clone()
@@ -142,31 +127,6 @@ impl PathState {
         }
 
         normalized
-    }
-}
-
-/// Cache manager for secrets
-#[derive(Debug)]
-pub struct CacheManager {
-    /// Cache storage (path -> invalidation marker)
-    cache: HashMap<String, ()>,
-}
-
-impl CacheManager {
-    pub fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
-        }
-    }
-
-    /// Invalidate specific path
-    pub fn invalidate(&mut self, path: &str) {
-        self.cache.remove(path);
-    }
-
-    /// Clear all cache
-    pub fn clear(&mut self) {
-        self.cache.clear();
     }
 }
 

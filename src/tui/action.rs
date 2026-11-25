@@ -10,26 +10,11 @@ pub enum Action {
     // ═══════════════════════════════════════════════════════════════
     // LIFECYCLE ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Tick event for periodic updates (e.g., log refresh)
-    Tick,
-
-    /// Request a render cycle
-    Render,
-
-    /// Terminal resized
-    Resize { width: u16, height: u16 },
-
     /// `q`: quit, after asking if an edit with unsaved changes is open
     Quit,
 
     /// Quit at once (Ctrl+C, or `q` once it is confirmed)
     QuitNow,
-
-    /// Suspend terminal (Ctrl+Z support)
-    Suspend,
-
-    /// Resume from suspension
-    Resume,
 
     // ═══════════════════════════════════════════════════════════════
     // NAVIGATION ACTIONS
@@ -62,11 +47,7 @@ pub enum Action {
     },
 
     /// A folder could not be listed (async completion)
-    FolderListFailed {
-        request: u64,
-        path: String,
-        message: String,
-    },
+    FolderListFailed { request: u64, message: String },
 
     /// The navigation cursor now rests on a different item.
     ///
@@ -78,27 +59,15 @@ pub enum Action {
         source: SelectionSource,
     },
 
-    /// Confirm/activate current selection
-    SelectConfirm,
-
     // ═══════════════════════════════════════════════════════════════
     // FOCUS ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Switch focus to next pane
-    FocusNext,
-
-    /// Switch focus to previous pane
-    FocusPrevious,
-
     /// Focus specific pane
     FocusPane { pane: FocusedPane },
 
     // ═══════════════════════════════════════════════════════════════
     // SCREEN TRANSITION ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Switch to main screen
-    ShowMainScreen,
-
     /// Switch to policy screen
     ShowPolicyScreen,
 
@@ -126,17 +95,8 @@ pub enum Action {
     /// Hide confirmation dialog
     HideConfirmation,
 
-    /// User confirmed dialog action
-    ConfirmationAccepted,
-
-    /// User rejected dialog action
-    ConfirmationRejected,
-
     /// Show create secret input
     ShowCreateSecretInput,
-
-    /// Hide create secret input
-    HideCreateSecretInput,
 
     // ═══════════════════════════════════════════════════════════════
     // SECRET ACTIONS
@@ -186,7 +146,7 @@ pub enum Action {
     SecretDeleted { path: String },
 
     /// A secret could not be deleted (async completion)
-    DeleteFailed { path: String, message: String },
+    DeleteFailed { message: String },
 
     /// View specific version of secret
     ViewSecretVersion { path: String, version: u64 },
@@ -265,9 +225,6 @@ pub enum Action {
     /// Copy text to clipboard
     CopyToClipboard { text: String },
 
-    /// Copy operation completed
-    CopyComplete { success: bool, message: String },
-
     /// Nothing was copied to the clipboard
     CopyFailed { message: String },
 
@@ -277,29 +234,14 @@ pub enum Action {
     /// Set status message
     SetStatus { message: String },
 
-    /// Clear status message
-    ClearStatus,
-
-    /// Clear error message
-    ClearError,
-
     /// Set loading state
     SetLoading { loading: bool },
-
-    // ═══════════════════════════════════════════════════════════════
-    // INPUT FORWARDING (for TextArea)
-    // ═══════════════════════════════════════════════════════════════
-    /// Forward key to TextArea component
-    TextInput { input: ratatui_textarea::Input },
 
     // ═══════════════════════════════════════════════════════════════
     // COMPOSITE/BATCH ACTIONS
     // ═══════════════════════════════════════════════════════════════
     /// Execute multiple actions in sequence
     Batch { actions: Vec<Action> },
-
-    /// No operation (useful for event handling that needs no action)
-    Noop,
 }
 
 /// Scroll direction for list and content views
@@ -379,11 +321,5 @@ mod tests {
         let pane = FocusedPane::Navigation;
         assert_eq!(pane, FocusedPane::Navigation);
         assert_ne!(pane, FocusedPane::Content);
-    }
-
-    #[test]
-    fn test_action_noop() {
-        let action = Action::Noop;
-        matches!(action, Action::Noop);
     }
 }

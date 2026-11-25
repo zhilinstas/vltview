@@ -9,7 +9,7 @@ use crate::tui::action::{Action, SelectionSource};
 use crate::tui::async_manager::AsyncManager;
 use crate::tui::component::Component;
 use crate::tui::components::{HelpOverlay, LogScreen, MainScreen, PolicyScreen};
-use crate::tui::context::{ActionSender, ComponentContext, FocusState, RenderContext};
+use crate::tui::context::{ActionSender, ComponentContext, RenderContext};
 
 /// How long the cursor has to rest on a secret before it is loaded.
 ///
@@ -76,9 +76,6 @@ pub struct Root {
     /// Policy screen component
     policy_screen: Box<dyn Component>,
 
-    /// Focus state
-    focus: FocusState,
-
     /// Async operation manager
     async_manager: AsyncManager,
 
@@ -120,7 +117,6 @@ impl Root {
             help_overlay: Box::new(HelpOverlay::new()),
             log_screen: Box::new(LogScreen::new()),
             policy_screen: Box::new(PolicyScreen::new()),
-            focus: FocusState::new(),
             async_manager: AsyncManager::new(runtime),
             should_quit: false,
             pending_clipboard: None,
@@ -136,7 +132,7 @@ impl Root {
     /// Initialize all components
     pub fn init(&mut self, app: &App) -> Result<()> {
         let action_tx = self.action_sender();
-        let mut ctx = ComponentContext::new(app, &self.focus, &action_tx);
+        let mut ctx = ComponentContext::new(app, &action_tx);
 
         // Initialize all screen components
         self.main_screen.init(&mut ctx)?;
@@ -173,7 +169,7 @@ impl Root {
         }
 
         let action_tx = self.action_sender();
-        let ctx = ComponentContext::new(app, &self.focus, &action_tx);
+        let ctx = ComponentContext::new(app, &action_tx);
 
         // Help overlay captures input when visible
         if self.help_overlay.captures_input() {
@@ -191,7 +187,7 @@ impl Root {
     /// Route pasted text to whatever text input has focus
     pub fn handle_paste(&mut self, text: &str, app: &App) -> Result<Option<Action>> {
         let action_tx = self.action_sender();
-        let ctx = ComponentContext::new(app, &self.focus, &action_tx);
+        let ctx = ComponentContext::new(app, &action_tx);
 
         // A paste is never a command: only the main screen has text inputs
         if self.help_overlay.captures_input() || self.active_screen != ActiveScreen::Main {
@@ -219,7 +215,7 @@ impl Root {
         // Busy means a request is in flight, whichever one it is
         let busy = self.async_manager.has_pending();
         let action_tx = self.action_sender();
-        let mut ctx = ComponentContext::new(app, &self.focus, &action_tx);
+        let mut ctx = ComponentContext::new(app, &action_tx);
         self.main_screen
             .update(Action::SetLoading { loading: busy }, &mut ctx)?;
 
@@ -263,7 +259,7 @@ impl Root {
     /// screen transitions or other side effects, including async operations.
     pub fn process_action(&mut self, action: Action, app: &mut App) -> Result<()> {
         let action_tx = self.action_sender();
-        let mut ctx = ComponentContext::new(app, &self.focus, &action_tx);
+        let mut ctx = ComponentContext::new(app, &action_tx);
 
         match &action {
             // The cursor moved to another item: the content pane follows,
@@ -437,7 +433,7 @@ impl Root {
             Action::ShowLogScreen => {
                 self.active_screen = ActiveScreen::Logs;
             }
-            Action::ShowMainScreen | Action::ScreenBack => {
+            Action::ScreenBack => {
                 self.active_screen = ActiveScreen::Main;
             }
             Action::ShowPolicyScreen => {
@@ -505,16 +501,13 @@ impl Root {
             | Action::EditSecret
             | Action::CreateSecret { .. }
             | Action::ShowCreateSecretInput
-            | Action::HideCreateSecretInput
             | Action::ShowDeleteConfirmation { .. }
             | Action::HideConfirmation
             | Action::SetStatus { .. }
-            | Action::ClearStatus
             | Action::SaveFailed { .. }
             | Action::DeleteFailed { .. }
             | Action::VersionLoadFailed { .. }
             | Action::CopyFailed { .. }
-            | Action::ClearError
             | Action::SetLoading { .. }
             | Action::StateUpdated
             | Action::FocusPane { .. }
@@ -569,50 +562,37 @@ impl Root {
 
     /// Spawn async operation to load a secret
     fn spawn_load_secret(&mut self, app: &App, path: String) {
-        let vault_client = app.vault_client().clone();
+        let secret_service = app.secret_service().clone();
         let failed_path = path.clone();
 
         self.async_manager.spawn(
             async move {
-                // Load secret data
-                let secret_data = vault_client.kv().get(&path).await?;
+                use crate::tui::action::{SecretMetadata, VersionInfo};
 
-                // Keep every field with its JSON type. Dropping non-string
-                // values here would delete them from Vault on the next save.
-                let data = secret_data.data;
-
-                // Load metadata
-                let metadata = match vault_client.kv().get_metadata(&path).await {
-                    Ok(meta) => {
-                        use crate::tui::action::{SecretMetadata, VersionInfo};
-
-                        let version_list = meta.version_list();
-                        let versions: Vec<VersionInfo> = version_list
-                            .into_iter()
-                            .map(|v| {
-                                let version_meta = meta.versions.get(&v.to_string());
-                                VersionInfo {
-                                    version: v,
-                                    created_time: version_meta
-                                        .map(|m| m.created_time.clone())
-                                        .unwrap_or_default(),
-                                    deleted: meta.is_version_deleted(v),
-                                }
-                            })
-                            .collect();
-
-                        Some(SecretMetadata {
-                            created_time: meta.created_time,
-                            updated_time: meta.updated_time,
-                            current_version: meta.current_version,
-                            versions,
+                let secret = secret_service.get(&path).await?;
+                let data = secret.data;
+                let metadata = secret.metadata.map(|meta| {
+                    let versions: Vec<VersionInfo> = meta
+                        .version_list()
+                        .into_iter()
+                        .map(|v| VersionInfo {
+                            version: v,
+                            created_time: meta
+                                .versions
+                                .get(&v.to_string())
+                                .map(|m| m.created_time.clone())
+                                .unwrap_or_default(),
+                            deleted: meta.is_version_deleted(v),
                         })
+                        .collect();
+
+                    SecretMetadata {
+                        created_time: meta.created_time,
+                        updated_time: meta.updated_time,
+                        current_version: meta.current_version,
+                        versions,
                     }
-                    Err(e) => {
-                        tracing::warn!("Failed to load metadata for {}: {}", path, e);
-                        None
-                    }
-                };
+                });
 
                 Ok(Action::SecretLoaded {
                     path: path.clone(),
@@ -648,7 +628,6 @@ impl Root {
             },
             move |e| Action::FolderListFailed {
                 request,
-                path: failed_path.clone(),
                 message: match kind {
                     ListingKind::Reload => format!("Could not reload {failed_path}: {e}"),
                     ListingKind::Open | ListingKind::History { .. } => {
@@ -711,7 +690,6 @@ impl Root {
             },
             move |e| Action::DeleteFailed {
                 message: format!("Could not delete {failed_path}: {e}"),
-                path: failed_path.clone(),
             },
         );
     }
@@ -837,7 +815,7 @@ impl Root {
     /// Render the current screen and overlays
     pub fn render(&mut self, frame: &mut Frame, app: &App) {
         let area = frame.area();
-        let ctx = RenderContext::new(app, &self.focus, true, area);
+        let ctx = RenderContext::new(app, true);
 
         // Render active screen
         match self.active_screen {
@@ -1277,7 +1255,6 @@ mod tests {
         root.process_action(open("/a/locked"), &mut app).unwrap();
         let failed = Action::FolderListFailed {
             request: listing(&root),
-            path: "/a/locked".to_string(),
             message: "Could not open /a/locked: permission denied".to_string(),
         };
         root.process_action(failed, &mut app).unwrap();
@@ -1316,7 +1293,6 @@ mod tests {
         root.process_action(Action::Refresh, &mut app).unwrap();
         let failed = Action::FolderListFailed {
             request,
-            path: "/a/dir".to_string(),
             message: "Could not open /a/dir: permission denied".to_string(),
         };
         root.process_action(failed, &mut app).unwrap();
@@ -1435,7 +1411,6 @@ mod tests {
         press(&mut root, &mut app, 'b');
         let failed = Action::FolderListFailed {
             request: listing(&root),
-            path: "/a".to_string(),
             message: "Could not open /a: permission denied".to_string(),
         };
         root.process_action(failed, &mut app).unwrap();
@@ -1531,7 +1506,6 @@ mod tests {
         root.process_action(policies, &mut app).unwrap();
 
         let failed = Action::DeleteFailed {
-            path: "/a".to_string(),
             message: "Could not delete /a: permission denied".to_string(),
         };
         root.process_action(failed, &mut app).unwrap();
@@ -1889,7 +1863,6 @@ mod tests {
             Context::Notice => {
                 let root = in_the_list(app);
                 let failed = Action::DeleteFailed {
-                    path: "/app/s09".to_string(),
                     message: "Could not delete /app/s09: permission denied".to_string(),
                 };
                 vec![after(app, root, failed)]

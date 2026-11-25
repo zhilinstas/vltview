@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
 
-use crate::state::AppState;
+use crate::vault::response::FullSecretMetadata;
 use crate::vault::{SecretData, VaultClient, WriteMode};
 
 /// Text shown (and edited) for a secret value.
@@ -59,16 +59,45 @@ pub fn edited_value(text: &str, original: Option<&Value>) -> Result<Value, serde
     }
 }
 
-/// Secret service for CRUD operations on secrets
+/// A secret as it is shown: its fields, and its version history when that
+/// could be read too
+pub struct LoadedSecret {
+    pub data: SecretData,
+    pub metadata: Option<FullSecretMetadata>,
+}
+
+/// Reads, writes and deletes secrets. The UI goes through this service
+/// rather than calling the Vault client itself.
 #[derive(Clone)]
 pub struct SecretService {
     vault: Arc<VaultClient>,
-    state: Arc<AppState>,
 }
 
 impl SecretService {
-    pub fn new(vault: Arc<VaultClient>, state: Arc<AppState>) -> Self {
-        Self { vault, state }
+    pub fn new(vault: Arc<VaultClient>) -> Self {
+        Self { vault }
+    }
+
+    /// The current version of a secret, with its history.
+    ///
+    /// Every field keeps its JSON type: dropping non-string values here
+    /// would delete them from Vault on the next save. The history is extra;
+    /// a token that may read the secret but not its metadata still gets the
+    /// secret.
+    pub async fn get(&self, path: &str) -> Result<LoadedSecret> {
+        let secret = self.vault.kv().get(path).await?;
+        let metadata = match self.vault.kv().get_metadata(path).await {
+            Ok(metadata) => Some(metadata),
+            Err(error) => {
+                tracing::warn!("Failed to load metadata for {path}: {error}");
+                None
+            }
+        };
+
+        Ok(LoadedSecret {
+            data: secret.data,
+            metadata,
+        })
     }
 
     pub async fn get_version(&self, path: &str, version: u64) -> Result<SecretData> {
@@ -78,15 +107,11 @@ impl SecretService {
 
     /// Write a secret. A create is refused if the path is already taken.
     pub async fn save(&self, path: &str, data: SecretData, mode: WriteMode) -> Result<()> {
-        self.vault.kv().put(path, data, mode).await?;
-        self.state.invalidate_cache(path);
-        Ok(())
+        self.vault.kv().put(path, data, mode).await
     }
 
     pub async fn delete(&self, path: &str) -> Result<()> {
-        self.vault.kv().delete(path).await?;
-        self.state.invalidate_cache(path);
-        Ok(())
+        self.vault.kv().delete(path).await
     }
 }
 

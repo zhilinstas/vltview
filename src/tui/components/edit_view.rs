@@ -936,7 +936,6 @@ fn crossterm_to_textarea_input(key: KeyEvent) -> Input {
 mod tests {
     use super::*;
     use crate::tui::components::popup::assert_shown_whole;
-    use crate::tui::context::FocusState;
     use ratatui::{Terminal, backend::TestBackend};
     use serde_json::json;
 
@@ -959,9 +958,8 @@ mod tests {
 
     fn with_ctx(body: impl FnOnce(&ComponentContext)) {
         let app = test_app();
-        let focus = FocusState::new();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        body(&ComponentContext::new(&app, &focus, &tx));
+        body(&ComponentContext::new(&app, &tx));
     }
 
     fn type_text(view: &mut EditViewComponent, ctx: &ComponentContext, text: &str) {
@@ -973,12 +971,11 @@ mod tests {
     /// Text on screen after drawing the view at the given size
     fn rendered(view: &mut EditViewComponent, width: u16, height: u16) -> String {
         let app = test_app();
-        let focus = FocusState::new();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let ctx = RenderContext::new(&app, &focus, true, area);
+                let ctx = RenderContext::new(&app, true);
                 view.draw(frame, area, &ctx);
             })
             .unwrap();

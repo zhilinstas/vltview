@@ -676,7 +676,6 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::config::Config;
-    use crate::tui::context::FocusState;
     use ratatui::{Terminal, backend::TestBackend};
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -692,9 +691,8 @@ mod tests {
             ..Config::default()
         };
         let app = App::new(config, "/".to_string()).unwrap();
-        let focus = FocusState::new();
         let (tx, _rx) = unbounded_channel();
-        let mut ctx = ComponentContext::new(&app, &focus, &tx);
+        let mut ctx = ComponentContext::new(&app, &tx);
 
         let mut screen = PolicyScreen::new();
         let loaded = Action::PoliciesLoaded {
@@ -711,7 +709,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let render_ctx = RenderContext::new(ctx.app, ctx.focus, true, area);
+                let render_ctx = RenderContext::new(ctx.app, true);
                 screen.draw(frame, area, &render_ctx);
             })
             .unwrap();

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use reqwest::{Client, ClientBuilder};
+use reqwest::ClientBuilder;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -23,14 +23,8 @@ const MAX_CONCURRENT_REQUESTS: usize = 10;
 
 /// Vault API client with rate limiting and security features
 pub struct VaultClient {
-    /// HTTP client
-    client: Client,
-
     /// Base URL for Vault API
     base_url: String,
-
-    /// The owner of the token, shared with the KV engine and the policy API
-    auth: Arc<AuthManager>,
 
     /// KV Engine API
     kv: KvEngine,
@@ -40,9 +34,6 @@ pub struct VaultClient {
 
     /// Optional namespace for Enterprise
     namespace: Option<String>,
-
-    /// Rate limiter semaphore to prevent API flooding
-    rate_limiter: Arc<Semaphore>,
 }
 
 impl VaultClient {
@@ -94,11 +85,11 @@ impl VaultClient {
 
         // Initialize policy API with rate limiter
         let policy = PolicyApi::new(
-            client.clone(),
+            client,
             base_url.clone(),
-            Arc::clone(&auth),
+            auth,
             namespace.clone(),
-            Arc::clone(&rate_limiter),
+            rate_limiter,
             auth_audit,
         );
 
@@ -107,14 +98,13 @@ impl VaultClient {
             MAX_CONCURRENT_REQUESTS
         );
 
+        // The HTTP client, the owner of the token and the rate limiter live
+        // on in the two APIs that share them
         Ok(Self {
-            client,
             base_url,
-            auth,
             kv,
             policy,
             namespace,
-            rate_limiter,
         })
     }
 
@@ -128,24 +118,9 @@ impl VaultClient {
         &self.policy
     }
 
-    /// Get the rate limiter for API throttling
-    pub fn rate_limiter(&self) -> &Arc<Semaphore> {
-        &self.rate_limiter
-    }
-
-    /// Get HTTP client
-    pub fn client(&self) -> &Client {
-        &self.client
-    }
-
     /// Get base URL
     pub fn base_url(&self) -> &str {
         &self.base_url
-    }
-
-    /// Get the owner of the token
-    pub fn auth(&self) -> &Arc<AuthManager> {
-        &self.auth
     }
 
     /// Get namespace
@@ -204,7 +179,7 @@ mod tests {
         // The token used to be cloned into the client, the KV engine and the
         // policy API, and to stay in the configuration as well
         let client = VaultClient::new(config("https://vault.example.com".to_string())).unwrap();
-        let owner = Arc::downgrade(client.auth());
+        let owner = Arc::downgrade(client.kv().token_owner());
 
         drop(client);
 

@@ -6,15 +6,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Once};
 
-/// Redact sensitive information from paths and data for logging
-pub fn redact_secret_value(value: &str) -> String {
-    if value.len() <= 8 {
-        "***".to_string()
-    } else {
-        format!("{}...{}", &value[..4], &value[value.len() - 4..])
-    }
-}
-
 /// Redact secret data for logging - shows keys but not values
 pub fn redact_secret_data<V>(data: &HashMap<String, V>) -> HashMap<String, String> {
     data.keys()

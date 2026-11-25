@@ -378,7 +378,6 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::config::Config;
-    use crate::tui::context::FocusState;
     use crate::tui::log_buffer::capture;
     use crate::vault::audit_log;
     use ratatui::{Terminal, backend::TestBackend};
@@ -432,12 +431,11 @@ mod tests {
     fn rendered(screen: &mut LogScreen) -> Vec<String> {
         let (width, height) = (80, 24);
         let app = test_app();
-        let focus = FocusState::new();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let ctx = RenderContext::new(&app, &focus, true, area);
+                let ctx = RenderContext::new(&app, true);
                 screen.draw(frame, area, &ctx);
             })
             .unwrap();
@@ -461,9 +459,8 @@ mod tests {
 
     fn send(screen: &mut LogScreen, action: Action) {
         let app = test_app();
-        let focus = FocusState::new();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut ctx = ComponentContext::new(&app, &focus, &tx);
+        let mut ctx = ComponentContext::new(&app, &tx);
         screen.update(action, &mut ctx).unwrap();
     }
 

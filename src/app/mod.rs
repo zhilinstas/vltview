@@ -45,7 +45,7 @@ impl App {
 
         // Initialize services
         let navigation = NavigationController::new(Arc::clone(&vault_client));
-        let secret_service = SecretService::new(Arc::clone(&vault_client), Arc::clone(&state));
+        let secret_service = SecretService::new(Arc::clone(&vault_client));
         let policy_service = PolicyService::new(Arc::clone(&vault_client));
 
         Ok(Self {
@@ -95,16 +95,6 @@ impl App {
             .await
             .with_context(|| format!("Failed to list initial path '{path}'"))?;
         self.state.reload_folder(&path, items);
-
-        Ok(())
-    }
-
-    /// Shutdown the application gracefully
-    pub async fn shutdown(&mut self) -> Result<()> {
-        tracing::info!("Shutting down application");
-
-        // Clear cache if needed
-        self.state.clear_cache();
 
         Ok(())
     }

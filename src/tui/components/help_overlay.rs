@@ -182,7 +182,6 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::config::Config;
-    use crate::tui::context::FocusState;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn test_app() -> App {
@@ -197,12 +196,11 @@ mod tests {
     /// Text on screen after drawing the overlay at the given size
     fn rendered(overlay: &mut HelpOverlay, width: u16, height: u16) -> Vec<String> {
         let app = test_app();
-        let focus = FocusState::new();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let ctx = RenderContext::new(&app, &focus, true, area);
+                let ctx = RenderContext::new(&app, true);
                 overlay.draw(frame, area, &ctx);
             })
             .unwrap();
@@ -247,9 +245,8 @@ mod tests {
         // Regression: the overlay was 80% of the screen with no scrolling,
         // so at 80x24 more than half of the bindings could not be read.
         let app = test_app();
-        let focus = FocusState::new();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = ComponentContext::new(&app, &focus, &tx);
+        let ctx = ComponentContext::new(&app, &tx);
 
         let mut overlay = HelpOverlay::new();
         overlay.visible = true;
@@ -281,9 +278,8 @@ mod tests {
     #[test]
     fn escape_and_question_mark_close_it() {
         let app = test_app();
-        let focus = FocusState::new();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = ComponentContext::new(&app, &focus, &tx);
+        let ctx = ComponentContext::new(&app, &tx);
 
         let mut overlay = HelpOverlay::new();
         for code in [KeyCode::Esc, KeyCode::Char('?'), KeyCode::Char('q')] {

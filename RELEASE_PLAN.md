@@ -32,7 +32,7 @@ Things to know about the upgrade:
   bundled Mozilla roots, so private CAs installed on the machine are trusted.
 - tui-textarea was replaced by ratatui-textarea (the ratatui org's fork),
   serde_yaml by serde_norway, chrono by jiff, dirs and once_cell by std.
-- The clippy gate passes `-A dead_code` for now (see step 5).
+- The clippy gate passed `-A dead_code` at first; step 5 removed it.
 
 ## Step 2: release blockers
 
@@ -162,7 +162,7 @@ Open:
 - [ ] CLAUDE.md asks for `ListState` and for no nested boxes; the navigation
       pane and the log screen scroll by hand and the editor draws a box
       inside the pane. Follow the rule or say what it really requires
-- [ ] Duplication to remove with step 5: the policy client repeats the
+- [x] Duplication to remove with step 5 (removed): the policy client repeats the
       request code that `kv.rs` extracted; the edit view collects its fields
       in two places and `save` uses the one that keeps empty keys; the TUI
       calls the Vault client directly in two places instead of going through
@@ -321,8 +321,10 @@ How it was done, where that is not obvious from the item:
 
 ## Step 5: cleanup
 
-- [ ] Wire up or delete the remaining dead-code items, then drop
-      `-A dead_code` from the clippy task in `mise.toml`. Step 4 dealt with
+- [x] Wire up or delete the remaining dead-code items, then drop
+      `-A dead_code` from the clippy task in `mise.toml`. Done: everything
+      below is deleted, nothing is silenced with an `allow`, and a plain
+      build has no warnings. Step 4 dealt with
       the emitted-but-unhandled actions, the scroll directions and
       `is_loading`; what is left:
   - Handled but never emitted: `ShowMainScreen`, `HideCreateSecretInput`,

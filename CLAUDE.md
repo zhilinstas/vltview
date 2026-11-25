@@ -99,13 +99,13 @@ Business logic layer. Service-oriented design with Arc/RwLock for shared state.
 
 **Key services:**
 - **NavigationController** (`navigation.rs`): Lists folders. It only reads; what is on screen changes in `AppState`
-- **SecretService** (`secret.rs`): CRUD operations for secrets, version management
+- **SecretService** (`secret.rs`): Reads a secret with its version history, reads one version, writes and deletes. The UI goes through it rather than calling the Vault client. The module also holds the rules for showing, masking and saving values (`display_value`, `masked`, `edited_value`)
 - **PolicyService** (`policy.rs`): List and retrieve Vault policies
 - **FilterEngine** (`filter.rs`): Fuzzy search/filtering for UI lists
 
 **State management** (`src/state/`):
 - `AppState` uses interior mutability (RwLock) for concurrent access
-- Stores current path, selection, cache, navigation history
+- Stores the folder on screen (path and items) and the history of folders visited. There is no cache: every view is a fresh read from Vault
 - Thread-safe via Arc wrapping
 
 ### 3. Vault Client Layer (`src/vault/`)
@@ -173,7 +173,7 @@ The navigation cursor is the selection, and the content pane shows it.
 - Read-only access via `&ComponentContext` (contains `&App`)
 - Mutations go through actions → App layer services
 - UI state (selection, scroll) lives in components
-- Business state (paths, cache) lives in AppState
+- Business state (the folder on screen, the history) lives in AppState
 
 ## File Organization
 
@@ -298,7 +298,7 @@ Environment variables:
 - The "token on the command line" warning is decided by `token_on_command_line` from where clap got the value. `cli.vault_token` is also set from `VAULT_TOKEN`
 
 ### Focus Management
-- `FocusState` tracks current focus (global, screen-level, pane-level)
+- Which pane has focus is state of the screen that owns the panes (`MainScreen::focused_pane`); it tells each pane through `RenderContext::is_focused`
 - Components check `RenderContext::is_focused` for styling
 - Tab key cycles focus between panes
 
@@ -359,26 +359,26 @@ Rules for this environment:
 The AsyncManager bridges async Vault API calls with the synchronous TUI event loop:
 
 ```rust
-// In Root::process_action()
-let app_clone = Arc::clone(&self.app);
-let tx = self.async_manager.action_sender();
+// In Root (see `spawn_load_secret`)
+let secret_service = app.secret_service().clone();
+let failed_path = path.clone();
 
-self.async_manager.spawn(async move {
-    match app_clone.secret_service().get_secret(&path).await {
-        Ok(data) => {
-            tx.send(Action::SecretLoaded { path, data, metadata }).unwrap();
-        }
-        Err(e) => {
-            tx.send(Action::SecretLoadFailed { path, message: e.to_string() }).unwrap();
-        }
-    }
-});
+self.async_manager.spawn(
+    async move {
+        let secret = secret_service.get(&path).await?;
+        Ok(Action::SecretLoaded { path, data: secret.data, metadata })
+    },
+    move |e| Action::SecretLoadFailed {
+        message: format!("Could not load {failed_path}: {e}"),
+        path: failed_path.clone(),
+    },
+);
 ```
 
 Key points:
-- Clone `Arc<App>` before moving into async closure
-- Get `tx` sender before spawning
-- Send completion action (success or error) via channel
+- Clone the service before moving it into the future; the future only talks to Vault and never touches `AppState` or the UI
+- `spawn` takes the future and a function that turns its error into an action; it sends whichever action results
+- Both the success and the failure say what they are for, so `Root` can drop them if the user has moved on
 - Main loop polls `async_manager.poll_completions()` to receive actions
 
 ## Release Process
@@ -443,7 +443,7 @@ Clipboard manager automatically clears copied secrets after 30 seconds:
 - Logs auto-clear events: `audit_log::log_security_event("clipboard.auto_cleared", ...)`
 
 ### When Adding New Features
-- **Never log tokens or secret values** - use `audit_log::redact_secret_value()` if needed
+- **Never log tokens or secret values**, not even in part. `audit_log::redact_secret_data()` keeps the field names and drops every value
 - **The token has one owner.** `vault::Token` is not `Clone` and is wiped on drop. It moves from where it was read into `Config`, and from there into the `AuthManager` when `VaultClient::new` takes the configuration; the client, `KvEngine` and `PolicyApi` share that `Arc<AuthManager>`. Do not copy `Token::expose()` into a `String`, do not make either type `Clone`, and do not keep a `Config` around. What this does not cover (copies inside reqwest, the environment, the argument list) is listed under "Security Notes" in the README; keep that list true
 - **Apply rate limiting** to new Vault API operations
 - **Sanitize all user input** going to Vault API

@@ -170,11 +170,6 @@ impl DetailViewComponent {
         }
     }
 
-    /// Get current mode
-    pub fn mode(&self) -> DetailMode {
-        self.mode
-    }
-
     /// Which set of keys applies right now
     pub fn context(&self) -> Context {
         if self.viewer.is_some() {
@@ -255,11 +250,6 @@ impl DetailViewComponent {
 
         // Switch back to data mode to show the loaded version
         self.mode = DetailMode::Data;
-    }
-
-    /// Get the version currently being viewed
-    pub fn viewing_version(&self) -> Option<u64> {
-        self.viewing_version
     }
 
     /// Toggle between data and version modes
@@ -861,7 +851,6 @@ fn format_timestamp(timestamp: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::context::FocusState;
     use ratatui::{Terminal, backend::TestBackend};
     use serde_json::json;
 
@@ -880,9 +869,8 @@ mod tests {
 
     fn with_ctx(body: impl FnOnce(&ComponentContext)) {
         let app = test_app();
-        let focus = FocusState::new();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        body(&ComponentContext::new(&app, &focus, &tx));
+        body(&ComponentContext::new(&app, &tx));
     }
 
     fn view_of(value: serde_json::Value) -> DetailViewComponent {
@@ -915,12 +903,11 @@ mod tests {
     /// Text on screen after drawing the view at the given size
     fn rendered(view: &mut DetailViewComponent, width: u16, height: u16) -> String {
         let app = test_app();
-        let focus = FocusState::new();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let ctx = RenderContext::new(&app, &focus, true, area);
+                let ctx = RenderContext::new(&app, true);
                 view.draw(frame, area, &ctx);
             })
             .unwrap();
@@ -1316,7 +1303,6 @@ mod tests {
         // Regression: the selected field stayed bright while the list had
         // focus, so both panes looked active.
         let app = test_app();
-        let focus = FocusState::new();
         let mut view = view_of(json!({"alpha": "1"}));
 
         let mut selection_bg = |focused: bool| {
@@ -1324,7 +1310,7 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let area = frame.area();
-                    let ctx = RenderContext::new(&app, &focus, focused, area);
+                    let ctx = RenderContext::new(&app, focused);
                     view.draw(frame, area, &ctx);
                 })
                 .unwrap();
