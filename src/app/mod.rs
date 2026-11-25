@@ -44,7 +44,7 @@ impl App {
         let vault_client = Arc::new(VaultClient::new(config.clone())?);
 
         // Initialize services
-        let navigation = NavigationController::new(Arc::clone(&state), Arc::clone(&vault_client));
+        let navigation = NavigationController::new(Arc::clone(&vault_client));
         let secret_service = SecretService::new(Arc::clone(&vault_client), Arc::clone(&state));
         let policy_service = PolicyService::new(Arc::clone(&vault_client));
 
@@ -89,10 +89,12 @@ impl App {
         // Load initial path. A failure here is fatal, so say which path
         // could not be listed (a token without list access is a common cause).
         let path = self.state.current_path();
-        self.navigation
-            .refresh()
+        let items = self
+            .navigation
+            .list(&path)
             .await
             .with_context(|| format!("Failed to list initial path '{path}'"))?;
+        self.state.reload_folder(&path, items);
 
         Ok(())
     }

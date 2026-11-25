@@ -1579,7 +1579,7 @@ mod tests {
         with_screen(|screen, ctx| {
             ctx.app
                 .state()
-                .set_list_items(vec!["db".to_string(), "dir/".to_string()]);
+                .reload_folder("/", vec!["db".to_string(), "dir/".to_string()]);
             screen.update(Action::ShowCreateSecretInput, ctx).unwrap();
 
             for c in "db".chars() {
@@ -1610,7 +1610,7 @@ mod tests {
         // Regression: without bracketed paste a pasted "dy" deleted the
         // selected secret.
         with_screen(|screen, ctx| {
-            ctx.app.state().set_list_items(vec!["db".to_string()]);
+            ctx.app.state().reload_folder("/", vec!["db".to_string()]);
             screen.init(ctx).unwrap();
             screen
                 .update(loaded("/db", json!({"k": "v"})), ctx)

@@ -97,7 +97,7 @@ Component-based architecture using Ratatui. The Root component manages screens a
 Business logic layer. Service-oriented design with Arc/RwLock for shared state.
 
 **Key services:**
-- **NavigationController** (`navigation.rs`): Manages path navigation, directory listing, history
+- **NavigationController** (`navigation.rs`): Lists folders. It only reads; what is on screen changes in `AppState`
 - **SecretService** (`secret.rs`): CRUD operations for secrets, version management
 - **PolicyService** (`policy.rs`): List and retrieve Vault policies
 - **FilterEngine** (`filter.rs`): Fuzzy search/filtering for UI lists
@@ -254,9 +254,11 @@ State is in `AppState` (Arc&lt;RwLock&gt;). Access patterns:
 // Read
 let path = ctx.app.state().current_path();
 
-// Write (via service methods, not direct RwLock access)
-ctx.app.navigation().navigate_to(new_path).await?;
+// Write: only `Root` does, when the result of a request it still wants arrives
+app.state().show_folder(path, items);
 ```
+
+The path on screen and its items change together (`show_folder`, `reload_folder`). A folder listing runs in the background and only reads; `Root` numbers each request and applies the result of the latest one only, so a slow listing cannot put one folder's items under another folder's path.
 
 ## Configuration
 

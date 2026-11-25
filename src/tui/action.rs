@@ -49,6 +49,22 @@ pub enum Action {
     /// Update UI from current state (after async operations complete)
     StateUpdated,
 
+    /// A folder was listed (async completion). `request` is the number
+    /// `Root` gave the request, so it can tell whether this listing is
+    /// still the one that is wanted.
+    FolderListed {
+        request: u64,
+        path: String,
+        items: Vec<String>,
+    },
+
+    /// A folder could not be listed (async completion)
+    FolderListFailed {
+        request: u64,
+        path: String,
+        message: String,
+    },
+
     /// The navigation cursor now rests on a different item.
     ///
     /// `secret` is the full path of the secret under the cursor, or `None`

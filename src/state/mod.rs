@@ -3,7 +3,8 @@ use std::sync::RwLock;
 
 /// Application state manager
 pub struct AppState {
-    /// Current path in Vault
+    /// The folder on screen: its path and its items, behind one lock so
+    /// that they can only change together
     path: RwLock<PathState>,
 
     /// Secret cache
@@ -28,15 +29,18 @@ impl AppState {
         self.path.read().unwrap().current.clone()
     }
 
-    /// Set current path
-    pub fn set_path(&self, path: String) {
+    /// Show another folder: the path and its items change in one step, so
+    /// nothing can read one folder's path with another folder's items
+    pub fn show_folder(&self, path: String, items: Vec<String>) {
         let mut path_state = self.path.write().unwrap();
-        let old_path = path_state.current.clone();
-        path_state.current = path;
-
-        // Add to history
+        let old_path = std::mem::replace(&mut path_state.current, path);
+        path_state.items = items;
+        let moved = old_path != path_state.current;
         drop(path_state);
-        self.history.write().unwrap().push(old_path);
+
+        if moved {
+            self.history.write().unwrap().push(old_path);
+        }
     }
 
     /// Invalidate cache for path
@@ -64,9 +68,15 @@ impl AppState {
         self.path.read().unwrap().items.clone()
     }
 
-    /// Set list items
-    pub fn set_list_items(&self, items: Vec<String>) {
-        self.path.write().unwrap().items = items;
+    /// Replace the items of the folder on screen (a reload of `path`).
+    /// Returns false, and changes nothing, if another folder is on screen.
+    pub fn reload_folder(&self, path: &str, items: Vec<String>) -> bool {
+        let mut path_state = self.path.write().unwrap();
+        if path_state.current != path {
+            return false;
+        }
+        path_state.items = items;
+        true
     }
 }
 
@@ -216,5 +226,20 @@ mod tests {
 
         let forward = history.forward();
         assert_eq!(forward, Some("/path2".to_string()));
+    }
+
+    #[test]
+    fn path_and_items_change_together() {
+        let state = AppState::new("/a".to_string());
+        assert!(state.reload_folder("/a", vec!["one".to_string()]));
+
+        state.show_folder("/b".to_string(), vec!["two".to_string()]);
+        assert_eq!(state.current_path(), "/b");
+        assert_eq!(state.list_items(), ["two"]);
+
+        // A listing of a folder that is not on screen changes nothing
+        assert!(!state.reload_folder("/a", vec!["late".to_string()]));
+        assert_eq!(state.current_path(), "/b");
+        assert_eq!(state.list_items(), ["two"]);
     }
 }

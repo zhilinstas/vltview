@@ -527,8 +527,18 @@ mod tests {
     }
 
     fn set_items(app: &App, items: &[&str]) {
-        app.state()
-            .set_list_items(items.iter().map(|s| s.to_string()).collect());
+        let state = app.state();
+        state.reload_folder(
+            &state.current_path(),
+            items.iter().map(|s| s.to_string()).collect(),
+        );
+    }
+
+    fn show_folder(app: &App, path: &str, items: &[&str]) {
+        app.state().show_folder(
+            path.to_string(),
+            items.iter().map(|s| s.to_string()).collect(),
+        );
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -644,8 +654,7 @@ mod tests {
     fn going_up_lands_on_the_folder_just_left() {
         let app = test_app("/app/team", &["db"]);
         with_pane(&app, |pane, ctx, _| {
-            ctx.app.state().set_path("/app".to_string());
-            set_items(ctx.app, &["alpha/", "team/", "zeta/", "readme"]);
+            show_folder(ctx.app, "/app", &["alpha/", "team/", "zeta/", "readme"]);
             pane.update(Action::StateUpdated, ctx).unwrap();
 
             assert_eq!(pane.selected_item(), Some("team/"));
@@ -665,8 +674,7 @@ mod tests {
 
             // Regression: the filter stayed on in the next folder and hid
             // everything in it that did not match
-            ctx.app.state().set_path("/app/prod".to_string());
-            set_items(ctx.app, &["api", "worker"]);
+            show_folder(ctx.app, "/app/prod", &["api", "worker"]);
             pane.update(Action::StateUpdated, ctx).unwrap();
 
             assert_eq!(pane.filter_text(), "");

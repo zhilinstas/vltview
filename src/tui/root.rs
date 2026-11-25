@@ -19,6 +19,24 @@ use crate::tui::context::{ActionSender, ComponentContext, FocusState, RenderCont
 /// stops on is loaded.
 const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(200);
 
+/// What a folder listing was requested for
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListingKind {
+    /// Go to another folder
+    Open,
+    /// Read the folder on screen again
+    Reload,
+}
+
+/// The folder listing that is wanted. Listings are not cancelled, so their
+/// results can arrive in any order; only the one for the latest request is
+/// applied, and the path and items on screen always change together.
+#[derive(Debug)]
+struct ListingRequest {
+    id: u64,
+    kind: ListingKind,
+}
+
 /// Active screen in the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveScreen {
@@ -79,6 +97,16 @@ pub struct Root {
 
     /// When the selection last changed
     last_selection_change: Option<Instant>,
+
+    /// The listing whose result is awaited, if any
+    listing: Option<ListingRequest>,
+
+    /// Number of the last listing request
+    listing_seq: u64,
+
+    /// A reload was asked for while the user was on the way to another
+    /// folder. It is made up for if they do not get there.
+    reload_skipped: bool,
 }
 
 impl Root {
@@ -97,6 +125,9 @@ impl Root {
             latest_secret_request: None,
             pending_preview: None,
             last_selection_change: None,
+            listing: None,
+            listing_seq: 0,
+            reload_skipped: false,
         }
     }
 
@@ -295,35 +326,85 @@ impl Root {
             }
 
             Action::NavigateTo { path } => {
-                self.spawn_navigate_to(app, path.clone());
+                self.request_listing(app, path.clone(), ListingKind::Open);
                 return Ok(());
             }
 
             Action::NavigateUp => {
                 let current = app.state().current_path();
                 if current != "/" {
-                    self.spawn_navigate_to(app, parent_path(&current));
+                    self.request_listing(app, parent_path(&current), ListingKind::Open);
                 }
                 return Ok(());
             }
 
             Action::Refresh => {
-                self.spawn_refresh(app);
+                // A folder the user is on the way to is listed fresh anyway,
+                // and a reload must not take its place as the listing wanted
+                if self
+                    .listing
+                    .as_ref()
+                    .is_some_and(|listing| listing.kind != ListingKind::Reload)
+                {
+                    self.reload_skipped = true;
+                } else {
+                    self.request_listing(app, app.state().current_path(), ListingKind::Reload);
+                }
                 return Ok(());
             }
 
             Action::HistoryBack => {
                 if let Some(path) = app.state().go_back() {
-                    self.spawn_navigate_to(app, path);
+                    self.request_listing(app, path, ListingKind::Open);
                 }
                 return Ok(());
             }
 
             Action::HistoryForward => {
                 if let Some(path) = app.state().go_forward() {
-                    self.spawn_navigate_to(app, path);
+                    self.request_listing(app, path, ListingKind::Open);
                 }
                 return Ok(());
+            }
+
+            Action::FolderListed {
+                request,
+                path,
+                items,
+            } => {
+                // Overtaken by a newer request: applying it would put this
+                // folder's items on screen after the user has moved on
+                let Some(kind) = self.take_listing(*request) else {
+                    tracing::debug!("Ignoring stale folder listing");
+                    return Ok(());
+                };
+                self.reload_skipped = false;
+
+                let state = app.state();
+                match kind {
+                    ListingKind::Open => state.show_folder(path.clone(), items.clone()),
+                    ListingKind::Reload => {
+                        state.reload_folder(path, items.clone());
+                    }
+                }
+                return self.process_action(Action::StateUpdated, app);
+            }
+
+            Action::FolderListFailed {
+                request, message, ..
+            } => {
+                if self.take_listing(*request).is_none() {
+                    tracing::debug!("Ignoring stale folder listing failure");
+                    return Ok(());
+                }
+                let message = message.clone();
+
+                // The user stays where they were, so the reload that was put
+                // off for this navigation is due after all
+                if std::mem::take(&mut self.reload_skipped) {
+                    self.request_listing(app, app.state().current_path(), ListingKind::Reload);
+                }
+                return self.process_action(Action::SetError { message }, app);
             }
 
             Action::CopyToClipboard { text } => {
@@ -519,36 +600,41 @@ impl Root {
         );
     }
 
-    /// Spawn async operation to navigate to a path
-    fn spawn_navigate_to(&mut self, app: &App, path: String) {
+    /// List a folder. This becomes the listing that is wanted: the result
+    /// of any earlier request is ignored when it arrives.
+    fn request_listing(&mut self, app: &App, path: String, kind: ListingKind) {
+        self.listing_seq += 1;
+        let request = self.listing_seq;
+        self.listing = Some(ListingRequest { id: request, kind });
+
         let nav = app.navigation().clone();
+        let failed_path = path.clone();
 
         self.async_manager.spawn(
             async move {
-                nav.navigate_to(path.clone()).await?;
-                // Emit action to update UI after state has been updated
-                Ok(Action::StateUpdated)
+                let items = nav.list(&path).await?;
+                Ok(Action::FolderListed {
+                    request,
+                    path,
+                    items,
+                })
             },
-            |e| Action::SetError {
-                message: format!("Navigation failed: {}", e),
+            move |e| Action::FolderListFailed {
+                request,
+                path: failed_path.clone(),
+                message: match kind {
+                    ListingKind::Open => format!("Could not open {failed_path}: {e}"),
+                    ListingKind::Reload => format!("Could not reload {failed_path}: {e}"),
+                },
             },
         );
     }
 
-    /// Spawn async operation to refresh current directory from Vault
-    fn spawn_refresh(&mut self, app: &App) {
-        let nav = app.navigation().clone();
-
-        self.async_manager.spawn(
-            async move {
-                nav.refresh().await?;
-                // Emit action to update UI after state has been updated
-                Ok(Action::StateUpdated)
-            },
-            |e| Action::SetError {
-                message: format!("Failed to refresh: {}", e),
-            },
-        );
+    /// What the listing `request` was for, if it is still the one wanted.
+    /// It is no longer awaited after this.
+    fn take_listing(&mut self, request: u64) -> Option<ListingKind> {
+        let listing = self.listing.take_if(|listing| listing.id == request)?;
+        Some(listing.kind)
     }
 
     /// Spawn async operation to delete a secret
@@ -714,6 +800,38 @@ mod tests {
             ..Config::default()
         };
         App::new(config, "/".to_string()).unwrap()
+    }
+
+    /// An app showing the folder `path` with `items` in it
+    fn test_app_at(path: &str, items: &[&str]) -> App {
+        let config = Config {
+            vault_addr: "http://127.0.0.1:1".to_string(),
+            vault_token: "test-token".to_string(),
+            ..Config::default()
+        };
+        let app = App::new(config, path.to_string()).unwrap();
+        app.state()
+            .reload_folder(path, items.iter().map(|s| s.to_string()).collect());
+        app
+    }
+
+    /// Number of the listing request that is awaited
+    fn listing(root: &Root) -> u64 {
+        root.listing.as_ref().expect("a listing is awaited").id
+    }
+
+    fn listed(request: u64, path: &str, items: &[&str]) -> Action {
+        Action::FolderListed {
+            request,
+            path: path.to_string(),
+            items: items.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn open(path: &str) -> Action {
+        Action::NavigateTo {
+            path: path.to_string(),
+        }
     }
 
     fn test_root(app: &App) -> Root {
@@ -1021,5 +1139,115 @@ mod tests {
         root.process_action(Action::ShowHelp, &mut app).unwrap();
         assert!(root.handle_paste("q", &app).unwrap().is_none());
         assert!(!root.should_quit());
+    }
+
+    #[tokio::test]
+    async fn a_late_reload_never_puts_its_items_under_another_folder() {
+        // Regression: a refresh wrote its items into whatever folder was
+        // current when it finished. Refreshing /a and opening /b before the
+        // refresh returned could leave /a's items under /b's path, where
+        // Enter or `d` would act on the wrong secret.
+        for reload_arrives_first in [true, false] {
+            let mut app = test_app_at("/a", &["a-old"]);
+            let mut root = test_root(&app);
+
+            root.process_action(Action::Refresh, &mut app).unwrap();
+            let reload = listed(listing(&root), "/a", &["a-new"]);
+            root.process_action(open("/b"), &mut app).unwrap();
+            let opened = listed(listing(&root), "/b", &["b-secret"]);
+
+            let results = if reload_arrives_first {
+                [reload, opened]
+            } else {
+                [opened, reload]
+            };
+            for result in results {
+                root.process_action(result, &mut app).unwrap();
+            }
+
+            assert_eq!(app.state().current_path(), "/b");
+            assert_eq!(app.state().list_items(), ["b-secret"]);
+            let text = screen_text(&mut root, &app);
+            assert!(text.contains("│ /b "), "{text}");
+            assert!(text.contains("b-secret"), "{text}");
+            assert!(!text.contains("a-new"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_last_folder_asked_for_is_shown() {
+        let mut app = test_app_at("/", &["a/", "b/"]);
+        let mut root = test_root(&app);
+
+        root.process_action(open("/a"), &mut app).unwrap();
+        let first = listed(listing(&root), "/a", &["in-a"]);
+        root.process_action(open("/b"), &mut app).unwrap();
+        let second = listed(listing(&root), "/b", &["in-b"]);
+
+        // /a answers after /b: it is no longer wanted
+        root.process_action(second, &mut app).unwrap();
+        root.process_action(first, &mut app).unwrap();
+
+        assert_eq!(app.state().current_path(), "/b");
+        assert_eq!(app.state().list_items(), ["in-b"]);
+        assert!(!screen_text(&mut root, &app).contains("in-a"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_navigation_leaves_the_folder_as_it_was() {
+        let mut app = test_app_at("/a", &["a-secret"]);
+        let mut root = test_root(&app);
+
+        root.process_action(open("/a/locked"), &mut app).unwrap();
+        let failed = Action::FolderListFailed {
+            request: listing(&root),
+            path: "/a/locked".to_string(),
+            message: "Could not open /a/locked: permission denied".to_string(),
+        };
+        root.process_action(failed, &mut app).unwrap();
+
+        assert_eq!(app.state().current_path(), "/a");
+        assert_eq!(app.state().list_items(), ["a-secret"]);
+        let text = screen_text(&mut root, &app);
+        assert!(text.contains("│ /a "), "{text}");
+        assert!(text.contains("a-secret"), "{text}");
+        assert!(text.contains("permission denied"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_reload_does_not_replace_a_navigation_that_is_on_its_way() {
+        // A save or a delete reloads the list when it completes. If the user
+        // has opened a folder meanwhile, that folder must still be shown.
+        let mut app = test_app_at("/a", &["dir/", "old"]);
+        let mut root = test_root(&app);
+
+        root.process_action(open("/a/dir"), &mut app).unwrap();
+        let opened = listed(listing(&root), "/a/dir", &["inside"]);
+        root.process_action(Action::Refresh, &mut app).unwrap();
+        root.process_action(opened, &mut app).unwrap();
+
+        assert_eq!(app.state().current_path(), "/a/dir");
+        assert_eq!(app.state().list_items(), ["inside"]);
+    }
+
+    #[tokio::test]
+    async fn a_reload_put_off_for_a_navigation_is_made_when_it_fails() {
+        let mut app = test_app_at("/a", &["dir/", "deleted"]);
+        let mut root = test_root(&app);
+
+        root.process_action(open("/a/dir"), &mut app).unwrap();
+        let request = listing(&root);
+        root.process_action(Action::Refresh, &mut app).unwrap();
+        let failed = Action::FolderListFailed {
+            request,
+            path: "/a/dir".to_string(),
+            message: "Could not open /a/dir: permission denied".to_string(),
+        };
+        root.process_action(failed, &mut app).unwrap();
+
+        // The folder on screen is read again after all
+        let reload = listed(listing(&root), "/a", &["dir/"]);
+        root.process_action(reload, &mut app).unwrap();
+        assert_eq!(app.state().list_items(), ["dir/"]);
     }
 }
