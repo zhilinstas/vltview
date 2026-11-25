@@ -264,7 +264,13 @@ The path on screen and its items change together (`show_folder`, `reload_folder`
 
 Configuration priority: CLI args > env vars > config file > defaults
 
-Config file location: `~/.vltview.yaml`
+Config file location: `~/.vltview.yaml`. Every key is optional. A file that
+does not parse, or has a key `Config` does not know, stops the start with an
+error naming the file; only a missing default file is not an error.
+
+`Config::load` does not read the process environment or the home directory
+itself: `main` passes them in as `config::Environment`, and tests pass their
+own.
 
 Environment variables:
 - `VAULT_ADDR`: Vault server address

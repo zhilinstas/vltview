@@ -121,14 +121,32 @@ vltview --config ~/.vltview.yaml
 
 ### Configuration File
 
-Create `~/.vltview.yaml`:
+`~/.vltview.yaml` is read if it exists; `--config FILE` names another file.
+Every key is optional:
 
 ```yaml
 vault_addr: http://localhost:8200
 vault_token: your-token
-vault_namespace: admin  # Optional, for Enterprise
-insecure_skip_verify: false
+vault_namespace: admin  # Vault Enterprise only
+insecure: false         # true skips TLS certificate verification, like --insecure
+timeout_secs: 30        # request timeout
 ```
+
+| Key | Environment | Command line | Default |
+|-----|-------------|--------------|---------|
+| `vault_addr` | `VAULT_ADDR` | `--vault-addr` | none, required |
+| `vault_token` | `VAULT_TOKEN` | `--vault-token` | contents of `~/.vault-token` |
+| `vault_namespace` | `VAULT_NAMESPACE` | `--vault-namespace` | none |
+| `insecure` | `VAULT_SKIP_VERIFY` (`1` or `true`) | `--insecure` | `false` |
+| `timeout_secs` | | | `30` |
+
+A value on the command line wins over the environment, which wins over the
+file. The file may hold only some of the values, for example the address,
+with the token coming from `VAULT_TOKEN`.
+
+A file that is not valid YAML, or that has a key not listed here, stops the
+start with an error naming the file and the problem. `cache_enabled` and
+`cache_ttl` are accepted for compatibility and have no effect.
 
 ### Key Bindings
 

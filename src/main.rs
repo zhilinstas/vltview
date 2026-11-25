@@ -11,7 +11,7 @@ mod state;
 mod tui;
 mod vault;
 
-use config::Config;
+use config::{Config, Environment};
 use tui::Tui;
 
 /// VltView - Terminal UI for HashiCorp Vault
@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = Config::load(
         cli.config.as_deref(),
+        Environment::from_process(),
         cli.vault_addr,
         cli.vault_token,
         cli.vault_namespace,
