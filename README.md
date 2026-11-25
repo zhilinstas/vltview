@@ -24,29 +24,32 @@ fresh read from Vault, and each read appears in Vault's own audit log.
 
 ## Screenshots
 
-### Navigation View
-![Navigation View](screenshots/1.png)
-*Browse Vault KV secrets with tree navigation*
+Taken in a 100x30 terminal against the sample data of the Docker dev
+environment (see Development below).
 
-### Secret Details
-![Secret Details](screenshots/2.png)
-*View secret keys and values with masked display*
+### The list and the secret under the cursor
+![The list with the secret under the cursor shown next to it](screenshots/1.png)
+*Moving the cursor shows the secret next to the list. Values are masked.*
 
-### Edit Secret
-![Edit Secret](screenshots/3.png)
-*Edit secrets with multi-line support*
+### Inside a secret
+![A secret with two values revealed](screenshots/2.png)
+*`Space` reveals the selected value, `v` all of them; the border says how many are in clear.*
 
-### Version History
-![Version History](screenshots/4.png)
-*Browse and restore previous secret versions (KV v2)*
+### Editing
+![The editor with one value being typed](screenshots/3.png)
+*The editor masks its list too. The value being typed is in clear in its own box.*
 
-### Help Overlay
-![Help Overlay](screenshots/5.png)
-*Quick access to all keyboard shortcuts*
+### Version history
+![The version history of a secret](screenshots/4.png)
+*Any version can be viewed, or restored as a new version.*
 
-### Application Logs
-![Application Logs](screenshots/6.png)
-*Real-time log monitoring for debugging*
+### Help
+![The help overlay](screenshots/5.png)
+*`?` lists every key, grouped by where it works. The footer always shows the keys that work right now.*
+
+### Session log
+![The log screen](screenshots/6.png)
+*What this session did to which path. Values are never logged.*
 
 ## Architecture
 

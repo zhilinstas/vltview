@@ -194,8 +194,8 @@ were computed from the layout constraints.
 Changes to put in the changelog:
 
 - The screen is laid out differently: one header line and one footer line,
-  and the secret is a single block. The screenshots in the README are out of
-  date.
+  and the secret is a single block. (The README screenshots were retaken
+  with step 5.)
 - Enter in a field now finishes the field; a line break in a value is
   Alt+Enter or Ctrl+J. Ctrl+S saves the secret from anywhere in the editor.
 - Deleting a secret is confirmed with `y` only.
