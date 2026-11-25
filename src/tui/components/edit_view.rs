@@ -13,7 +13,7 @@ use crate::app::secret::{display_value, edited_value, json_type_name};
 use crate::tui::action::Action;
 use crate::tui::component::Component;
 use crate::tui::components::popup::{
-    border_color, centered, display_width, selection_style, truncate, wrap,
+    border_color, centered, display_width, selection_style, truncate, wrap, wrap_words,
 };
 use crate::tui::context::{ComponentContext, RenderContext};
 use crate::vault::{SecretData, WriteMode};
@@ -32,6 +32,30 @@ pub enum EditMode {
     EditKey,
 }
 
+/// One row of the editor
+#[derive(Debug, Clone, PartialEq)]
+struct Field {
+    key: String,
+    /// The value as editable text
+    text: String,
+    /// The value this row had when it was loaded, if it was not a string
+    /// (a number, boolean, null, array or object). Used on save so the field
+    /// keeps its JSON type instead of being stringified. It belongs to the
+    /// row, not to the key: renaming a field keeps its type, and two rows
+    /// that share a key for a moment cannot take each other's.
+    original: Option<serde_json::Value>,
+}
+
+impl Field {
+    fn new(key: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            text: text.into(),
+            original: None,
+        }
+    }
+}
+
 /// Edit view component for modifying secrets
 ///
 /// This component has three modes:
@@ -45,14 +69,8 @@ pub struct EditViewComponent {
     /// Secret path
     path: String,
 
-    /// Fields (key-value pairs) - stored as Vec for ordering.
-    /// Values are held as editable text; see `typed_originals`.
-    fields: Vec<(String, String)>,
-
-    /// Original values of the fields that were not strings when loaded
-    /// (numbers, booleans, null, arrays, objects), by key. Used on save so
-    /// those fields keep their JSON type instead of being stringified.
-    typed_originals: SecretData,
+    /// Fields, in the order shown
+    fields: Vec<Field>,
 
     /// Selected field index
     selected_index: usize,
@@ -98,11 +116,10 @@ fn styled_textarea(lines: Vec<String>) -> TextArea<'static> {
 }
 
 impl EditViewComponent {
-    fn with_fields(path: String, fields: Vec<(String, String)>, typed: SecretData) -> Self {
+    fn with_fields(path: String, fields: Vec<Field>) -> Self {
         Self {
             path,
             fields,
-            typed_originals: typed,
             selected_index: 0,
             mode: EditMode::Navigate,
             key_textarea: styled_textarea(Vec::new()),
@@ -119,27 +136,22 @@ impl EditViewComponent {
 
     /// Create a new edit view component for an existing secret
     pub fn new(path: String, secret: SecretData) -> Self {
-        let mut fields: Vec<(String, String)> = secret
-            .iter()
-            .map(|(key, value)| (key.clone(), display_value(value)))
-            .collect();
-        fields.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let typed_originals: SecretData = secret
+        let mut fields: Vec<Field> = secret
             .into_iter()
-            .filter(|(_, value)| !value.is_string())
+            .map(|(key, value)| Field {
+                key,
+                text: display_value(&value),
+                original: (!value.is_string()).then_some(value),
+            })
             .collect();
+        fields.sort_by(|a, b| a.key.cmp(&b.key));
 
-        Self::with_fields(path, fields, typed_originals)
+        Self::with_fields(path, fields)
     }
 
     /// Create a new edit view component for creating a new secret
     pub fn new_secret(path: String) -> Self {
-        let mut view = Self::with_fields(
-            path,
-            vec![("".to_string(), "".to_string())],
-            SecretData::new(),
-        );
+        let mut view = Self::with_fields(path, vec![Field::new("", "")]);
         view.mode = EditMode::EditKey;
         view.is_new = true;
         view
@@ -161,56 +173,71 @@ impl EditViewComponent {
         &self.path
     }
 
-    /// Get secret data for saving, with value types restored.
+    /// Whether there are changes that have not been saved
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.has_changes
+    }
+
+    /// The fields as they would be written to Vault, with value types
+    /// restored, or the reason they cannot be written.
     ///
-    /// Fails with a message for the user if a field that held a non-string
-    /// value was edited into something that is not valid JSON.
+    /// Refused, with a message for the user:
+    /// - a row with a value but no key (it would be stored under the empty
+    ///   name);
+    /// - two rows with the same key (one would silently replace the other);
+    /// - a field that held a non-string value and was edited into something
+    ///   that is not valid JSON.
+    ///
+    /// A row with neither a key nor a value is not a field and is left out.
     pub fn secret_data(&self) -> Result<SecretData, String> {
-        self.fields
-            .iter()
-            .map(|(key, text)| Ok((key.clone(), self.value_for_save(key, text)?)))
-            .collect()
+        let mut data = SecretData::new();
+        for (row, field) in self.fields.iter().enumerate() {
+            if field.key.is_empty() {
+                if field.text.is_empty() {
+                    continue;
+                }
+                return Err(format!(
+                    "Row {} has a value but no key. Give it a key, or delete the row.",
+                    row + 1
+                ));
+            }
+            if data.contains_key(&field.key) {
+                return Err(format!(
+                    "Two fields are named '{}'. Rename or delete one of them.",
+                    field.key
+                ));
+            }
+            data.insert(field.key.clone(), Self::value_for_save(field)?);
+        }
+        Ok(data)
     }
 
     /// Value to store for a field: see `edited_value` for the rules
-    fn value_for_save(&self, key: &str, text: &str) -> Result<serde_json::Value, String> {
-        let original = self.typed_originals.get(key);
-        edited_value(text, original).map_err(|_| {
+    fn value_for_save(field: &Field) -> Result<serde_json::Value, String> {
+        let original = field.original.as_ref();
+        edited_value(&field.text, original).map_err(|_| {
             let kind = original.map(json_type_name).unwrap_or("value");
             format!(
-                "Field '{key}' holds a JSON {kind}, and its new value is not valid JSON. \
-                 Fix it, or put it in double quotes to save it as text."
+                "Field '{}' holds a JSON {kind}, and its new value is not valid JSON. \
+                 Fix it, or put it in double quotes to save it as text.",
+                field.key
             )
         })
     }
 
-    /// Rename the selected field's key, keeping its original type attached
+    /// Rename the selected field's key. Its original type stays with it.
     fn rename_selected_key(&mut self, new_key: String) {
-        if let Some((key, _)) = self.fields.get_mut(self.selected_index) {
-            if *key != new_key
-                && let Some(original) = self.typed_originals.remove(key.as_str())
-            {
-                self.typed_originals.insert(new_key.clone(), original);
-            }
-            if *key != new_key {
-                self.has_changes = true;
-            }
-            *key = new_key;
+        if let Some(field) = self.fields.get_mut(self.selected_index)
+            && field.key != new_key
+        {
+            field.key = new_key;
+            self.has_changes = true;
         }
     }
 
     /// Check if in edit mode
     pub fn is_editing(&self) -> bool {
         self.mode != EditMode::Navigate
-    }
-
-    /// Get fields as HashMap for saving
-    pub fn get_data(&self) -> Result<SecretData, String> {
-        self.fields
-            .iter()
-            .filter(|(k, _)| !k.is_empty())
-            .map(|(key, text)| Ok((key.clone(), self.value_for_save(key, text)?)))
-            .collect()
     }
 
     /// Set error message
@@ -242,16 +269,17 @@ impl EditViewComponent {
 
     /// Start editing the selected field's value
     fn start_edit_value(&mut self) {
-        if let Some((_, value)) = self.fields.get(self.selected_index) {
-            self.value_textarea = styled_textarea(value.split('\n').map(str::to_string).collect());
+        if let Some(field) = self.fields.get(self.selected_index) {
+            self.value_textarea =
+                styled_textarea(field.text.split('\n').map(str::to_string).collect());
             self.mode = EditMode::EditValue;
         }
     }
 
     /// Start editing the selected field's key
     fn start_edit_key(&mut self) {
-        if let Some((key, _)) = self.fields.get(self.selected_index) {
-            self.key_textarea = styled_textarea(vec![key.clone()]);
+        if let Some(field) = self.fields.get(self.selected_index) {
+            self.key_textarea = styled_textarea(vec![field.key.clone()]);
             self.mode = EditMode::EditKey;
         }
     }
@@ -266,10 +294,10 @@ impl EditViewComponent {
         match self.mode {
             EditMode::EditValue => {
                 let text = self.value_textarea.lines().join("\n");
-                if let Some((_, value)) = self.fields.get_mut(self.selected_index)
-                    && *value != text
+                if let Some(field) = self.fields.get_mut(self.selected_index)
+                    && field.text != text
                 {
-                    *value = text;
+                    field.text = text;
                     self.has_changes = true;
                 }
             }
@@ -326,7 +354,7 @@ impl EditViewComponent {
     /// Add a new field (Navigate mode only)
     fn add_field(&mut self) {
         if self.mode == EditMode::Navigate {
-            self.fields.push(("".to_string(), "".to_string()));
+            self.fields.push(Field::new("", ""));
             self.selected_index = self.fields.len() - 1;
             self.has_changes = true;
             // Start editing the new field's key
@@ -338,7 +366,7 @@ impl EditViewComponent {
     fn delete_field(&mut self) {
         if self.mode == EditMode::Navigate && !self.fields.is_empty() {
             // Show confirmation dialog
-            let field_name = self.fields[self.selected_index].0.clone();
+            let field_name = self.fields[self.selected_index].key.clone();
             self.delete_confirmation = Some(field_name);
         }
     }
@@ -349,16 +377,16 @@ impl EditViewComponent {
             && self.mode == EditMode::Navigate
             && !self.fields.is_empty()
         {
-            let (removed_key, _) = self.fields.remove(self.selected_index);
-            // A field added later under the same name starts as a string
-            self.typed_originals.remove(&removed_key);
+            // The row goes with its original type: a field added later under
+            // the same name starts as a string
+            self.fields.remove(self.selected_index);
             self.has_changes = true;
             if self.selected_index >= self.fields.len() && self.selected_index > 0 {
                 self.selected_index -= 1;
             }
             // Ensure at least one field exists for new secrets
             if self.is_new && self.fields.is_empty() {
-                self.fields.push(("".to_string(), "".to_string()));
+                self.fields.push(Field::new("", ""));
                 self.selected_index = 0;
             }
             self.delete_confirmation = None;
@@ -375,7 +403,15 @@ impl EditViewComponent {
     /// A problem with a value is shown here, next to the fields, so the edit
     /// stays on screen while it is fixed.
     fn save(&mut self) -> Option<Action> {
-        match self.secret_data() {
+        let data = self.secret_data().and_then(|data| {
+            if self.is_new && data.is_empty() {
+                Err("A new secret needs at least one field with a key.".to_string())
+            } else {
+                Ok(data)
+            }
+        });
+
+        match data {
             Ok(data) => Some(Action::SaveSecret {
                 path: self.path.clone(),
                 data,
@@ -401,7 +437,7 @@ impl EditViewComponent {
         let widest = self
             .fields
             .iter()
-            .map(|(key, _)| display_width(key))
+            .map(|field| display_width(&field.key))
             .max()
             .unwrap_or(0);
         let key_width = widest
@@ -412,7 +448,8 @@ impl EditViewComponent {
         let items: Vec<ListItem> = self
             .fields
             .iter()
-            .map(|(key, value)| {
+            .map(|field| {
+                let (key, value) = (&field.key, &field.text);
                 let (key_text, key_style) = if key.is_empty() {
                     ("<key>".to_string(), Style::default().fg(Color::DarkGray))
                 } else {
@@ -732,18 +769,18 @@ impl Component for EditViewComponent {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // The error is wrapped, not cut: it says how to fix the value
+        // The error is wrapped at spaces, and all of it is shown: it says
+        // how to fix the problem
         let error_lines = self
             .error
             .as_deref()
             .map(|error| {
-                wrap(
+                wrap_words(
                     &format!("✗ {error}"),
                     inner.width.saturating_sub(2) as usize,
                 )
             })
             .unwrap_or_default();
-        let error_height = error_lines.len().min(4) as u16;
 
         let editor_height = match self.mode {
             EditMode::Navigate => 0,
@@ -760,6 +797,10 @@ impl Component for EditViewComponent {
             .as_deref()
             .map(|note| wrap(note, inner.width.saturating_sub(2) as usize))
             .unwrap_or_default();
+
+        // The field list gives way to the error, down to one row
+        let error_height =
+            (error_lines.len() as u16).min(inner.height.saturating_sub(editor_height + 1));
 
         let chunks = Layout::vertical([
             Constraint::Length(note_lines.len().min(2) as u16),
@@ -971,22 +1012,6 @@ mod tests {
         assert!(!view.is_editing());
     }
 
-    #[test]
-    fn test_get_data() {
-        let mut view = EditViewComponent::new_secret("/secret/test".to_string());
-        view.fields = vec![
-            ("username".to_string(), "admin".to_string()),
-            ("".to_string(), "ignored".to_string()), // Empty key should be filtered
-            ("password".to_string(), "secret".to_string()),
-        ];
-
-        let data = view.get_data().unwrap();
-        assert_eq!(data.len(), 2);
-        assert_eq!(data.get("username"), Some(&json!("admin")));
-        assert_eq!(data.get("password"), Some(&json!("secret")));
-        assert!(!data.contains_key(""));
-    }
-
     fn typed_secret() -> SecretData {
         serde_json::from_value(json!({
             "host": "db",
@@ -1001,7 +1026,7 @@ mod tests {
 
     /// Replace the value of the field named `key`, as the value editor does
     fn set_value(view: &mut EditViewComponent, key: &str, text: &str) {
-        view.selected_index = view.fields.iter().position(|(k, _)| k == key).unwrap();
+        view.selected_index = view.fields.iter().position(|f| f.key == key).unwrap();
         view.start_edit_value();
         view.value_textarea = TextArea::new(vec![text.to_string()]);
         view.confirm_edit();
@@ -1084,7 +1109,7 @@ mod tests {
     fn test_renaming_a_typed_field_keeps_its_type() {
         let mut view = EditViewComponent::new("/secret/test".to_string(), typed_secret());
 
-        view.selected_index = view.fields.iter().position(|(k, _)| k == "port").unwrap();
+        view.selected_index = view.fields.iter().position(|f| f.key == "port").unwrap();
         view.start_edit_key();
         view.key_textarea = TextArea::new(vec!["db_port".to_string()]);
         view.confirm_edit();
@@ -1099,11 +1124,11 @@ mod tests {
         let mut view = EditViewComponent::new("/secret/test".to_string(), typed_secret());
 
         // Delete the numeric field, then add a new one with the same name
-        view.selected_index = view.fields.iter().position(|(k, _)| k == "port").unwrap();
+        view.selected_index = view.fields.iter().position(|f| f.key == "port").unwrap();
         view.delete_field();
         view.confirm_delete_field();
-        view.fields.push(("port".to_string(), "8080".to_string()));
-        view.fields.push(("retries".to_string(), "3".to_string()));
+        view.fields.push(Field::new("port", "8080"));
+        view.fields.push(Field::new("retries", "3"));
 
         let data = view.secret_data().unwrap();
         assert_eq!(data["port"], json!("8080"));
@@ -1150,7 +1175,7 @@ mod tests {
             type_text(&mut view, ctx, "-1");
             view.handle_key(key(KeyCode::Enter), ctx).unwrap();
             assert_eq!(view.mode, EditMode::Navigate);
-            assert_eq!(view.fields[0].1, "db-1");
+            assert_eq!(view.fields[0].text, "db-1");
             assert!(view.has_changes);
 
             // Esc drops what was typed
@@ -1158,7 +1183,7 @@ mod tests {
             type_text(&mut view, ctx, "xyz");
             view.handle_key(key(KeyCode::Esc), ctx).unwrap();
             assert_eq!(view.mode, EditMode::Navigate);
-            assert_eq!(view.fields[0].1, "db-1");
+            assert_eq!(view.fields[0].text, "db-1");
         });
     }
 
@@ -1195,7 +1220,7 @@ mod tests {
             type_text(&mut view, ctx, "abc");
             view.handle_key(key(KeyCode::Enter), ctx).unwrap();
             assert_eq!(view.mode, EditMode::Navigate);
-            assert_eq!(view.fields, [("token".to_string(), "abc".to_string())]);
+            assert_eq!(view.fields, [Field::new("token", "abc")]);
         });
     }
 
@@ -1209,7 +1234,7 @@ mod tests {
             view.handle_key(ctrl('m'), ctx).unwrap();
             view.handle_paste("rt\nificate", ctx).unwrap();
             view.handle_key(key(KeyCode::Tab), ctx).unwrap();
-            assert_eq!(view.fields[0].0, "certificate");
+            assert_eq!(view.fields[0].key, "certificate");
 
             // A value does: Alt+Enter, Ctrl+J, or a paste
             assert_eq!(view.mode, EditMode::EditValue);
@@ -1222,7 +1247,7 @@ mod tests {
             view.handle_key(key(KeyCode::Enter), ctx).unwrap();
 
             assert_eq!(view.mode, EditMode::Navigate);
-            assert_eq!(view.fields[0].1, "one\ntwo\nthree\nfour");
+            assert_eq!(view.fields[0].text, "one\ntwo\nthree\nfour");
         });
     }
 
@@ -1320,6 +1345,142 @@ mod tests {
 
             assert_eq!(view.fields.len(), 2);
             assert!(view.has_delete_confirmation(), "the question is still open");
+        });
+    }
+
+    fn editor(value: serde_json::Value) -> EditViewComponent {
+        EditViewComponent::new(
+            "/secret/test".to_string(),
+            serde_json::from_value(value).unwrap(),
+        )
+    }
+
+    /// Add a field with the given key and value, as a user does
+    fn add(view: &mut EditViewComponent, ctx: &ComponentContext, name: &str, value: &str) {
+        view.handle_key(key(KeyCode::Char('a')), ctx).unwrap();
+        type_text(view, ctx, name);
+        view.handle_key(key(KeyCode::Enter), ctx).unwrap();
+        type_text(view, ctx, value);
+        view.handle_key(key(KeyCode::Enter), ctx).unwrap();
+    }
+
+    /// The words of `message` appear on screen in order, none of them cut
+    fn assert_shown_whole(screen: &str, message: &str) {
+        let shown: Vec<&str> = screen
+            .split(|c: char| c.is_whitespace() || c == '│')
+            .filter(|word| !word.is_empty())
+            .collect();
+        let mut from = 0;
+        for word in message.split_whitespace() {
+            let found = shown[from..].iter().position(|shown| *shown == word);
+            from += found.unwrap_or_else(|| panic!("{word:?} is missing or cut\n{screen}")) + 1;
+        }
+    }
+
+    #[test]
+    fn a_value_without_a_key_is_refused_and_nothing_is_sent() {
+        // Regression: Ctrl+S sent the field under the empty name, `{"": ...}`.
+        with_ctx(|ctx| {
+            let mut view = editor(json!({"host": "db"}));
+            add(&mut view, ctx, "", "orphan");
+
+            let action = view.handle_key(ctrl('s'), ctx).unwrap();
+            assert!(action.is_none(), "nothing may be sent: {action:?}");
+
+            // The content pane of an 80x24 terminal
+            let screen = rendered(&mut view, 52, 22);
+            assert_shown_whole(
+                &screen,
+                "Row 2 has a value but no key. Give it a key, or delete the row.",
+            );
+            // Everything typed is still there
+            assert!(screen.contains("orphan"), "{screen}");
+            assert!(screen.contains("host"), "{screen}");
+
+            // The message goes away on the next key
+            view.handle_key(key(KeyCode::Up), ctx).unwrap();
+            assert!(!rendered(&mut view, 52, 22).contains("has a value but no key"));
+        });
+    }
+
+    #[test]
+    fn two_fields_with_one_key_are_refused() {
+        // Regression: the second field silently replaced the first on save.
+        with_ctx(|ctx| {
+            let mut view = editor(json!({"host": "db"}));
+            add(&mut view, ctx, "host", "other");
+
+            let action = view.handle_key(ctrl('s'), ctx).unwrap();
+            assert!(action.is_none(), "nothing may be sent: {action:?}");
+            let screen = rendered(&mut view, 52, 22);
+            assert_shown_whole(
+                &screen,
+                "Two fields are named 'host'. Rename or delete one of them.",
+            );
+        });
+    }
+
+    #[test]
+    fn an_empty_row_is_left_out_of_the_save() {
+        with_ctx(|ctx| {
+            let mut view = EditViewComponent::new_secret("/secret/test".to_string());
+            type_text(&mut view, ctx, "user");
+            view.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            type_text(&mut view, ctx, "admin");
+            view.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            // A second row that is never filled in
+            add(&mut view, ctx, "", "");
+
+            match view.handle_key(ctrl('s'), ctx).unwrap() {
+                Some(Action::SaveSecret { data, .. }) => {
+                    assert_eq!(
+                        data,
+                        serde_json::from_value(json!({"user": "admin"})).unwrap()
+                    );
+                }
+                other => panic!("expected a save, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn a_new_secret_with_no_named_field_is_not_sent() {
+        with_ctx(|ctx| {
+            let mut view = EditViewComponent::new_secret("/secret/test".to_string());
+            // Leave the first key empty
+            view.handle_key(key(KeyCode::Esc), ctx).unwrap();
+
+            let action = view.handle_key(ctrl('s'), ctx).unwrap();
+            assert!(action.is_none(), "nothing may be sent: {action:?}");
+            assert_shown_whole(
+                &rendered(&mut view, 52, 22),
+                "A new secret needs at least one field with a key.",
+            );
+        });
+    }
+
+    #[test]
+    fn a_name_clash_does_not_cost_the_other_field_its_type() {
+        // A field renamed onto the name of a typed field, and away again,
+        // must leave that field a number
+        with_ctx(|ctx| {
+            let mut view = editor(json!({"port": 5432}));
+            add(&mut view, ctx, "port", "x");
+            assert!(view.handle_key(ctrl('s'), ctx).unwrap().is_none());
+
+            // Rename the new row
+            view.handle_key(key(KeyCode::Char('r')), ctx).unwrap();
+            type_text(&mut view, ctx, "2");
+            view.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            view.handle_key(key(KeyCode::Enter), ctx).unwrap();
+
+            match view.handle_key(ctrl('s'), ctx).unwrap() {
+                Some(Action::SaveSecret { data, .. }) => {
+                    assert_eq!(data["port"], json!(5432));
+                    assert_eq!(data["port2"], json!("x"));
+                }
+                other => panic!("expected a save, got {other:?}"),
+            }
         });
     }
 }

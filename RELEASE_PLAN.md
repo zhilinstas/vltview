@@ -92,9 +92,11 @@ Behaviour changes to put in the changelog:
       text input that has focus and is dropped anywhere else
 - [x] History back/forward ping-pongs between two paths; forward never works
 - [x] Refresh/navigate race can leave one directory's items under another path
-- [ ] Edit view accepts empty and duplicate keys (Ctrl+S on a new secret
+- [x] Edit view accepts empty and duplicate keys (Ctrl+S on a new secret
       with an unnamed field still sends `{"": ""}`). Newlines in keys were
-      fixed with step 4
+      fixed with step 4. Fixed: a value without a key and two fields with
+      one key are refused in the editor, an empty row is left out, and a
+      new secret with no named field is not sent
 - [ ] Unsaved edits are discarded without confirmation (`has_changes` is never
       read)
 - [x] Policy screen: errors land on the main screen, viewport height is
