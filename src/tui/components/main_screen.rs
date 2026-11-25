@@ -1,16 +1,16 @@
-use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
-    Frame,
-};
 use crate::tui::action::{Action, FocusedPane};
 use crate::tui::component::Component;
 use crate::tui::components::{DetailViewComponent, EditViewComponent, NavigationPane};
 use crate::tui::context::{ComponentContext, RenderContext};
+use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{
+    Frame,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
+};
 
 /// Input mode for the main screen
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +80,11 @@ impl MainScreen {
     }
 
     /// Handle create secret name input
-    fn handle_create_secret_input(&mut self, key: KeyEvent, ctx: &ComponentContext) -> Result<Option<Action>> {
+    fn handle_create_secret_input(
+        &mut self,
+        key: KeyEvent,
+        ctx: &ComponentContext,
+    ) -> Result<Option<Action>> {
         match key.code {
             KeyCode::Char(c) => {
                 self.new_secret_name.push(c);
@@ -262,9 +266,7 @@ impl MainScreen {
                         Span::raw(": New | "),
                         Span::styled(
                             "d",
-                            Style::default()
-                                .fg(Color::Red)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                         ),
                         Span::raw(": Delete | "),
                         Span::styled(
@@ -320,12 +322,13 @@ impl MainScreen {
                 Line::from(""),
                 Line::from(Span::styled(
                     "Error",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
-                Line::from(Span::styled(error.as_str(), Style::default().fg(Color::Red))),
+                Line::from(Span::styled(
+                    error.as_str(),
+                    Style::default().fg(Color::Red),
+                )),
                 Line::from(""),
                 Line::from(""),
                 Line::from(Span::styled(
@@ -393,9 +396,7 @@ impl MainScreen {
         // Title
         let title = Paragraph::new(Line::from(vec![Span::styled(
             " Confirm Delete ",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )]))
         .alignment(Alignment::Center)
         .block(
@@ -422,19 +423,15 @@ impl MainScreen {
             Line::from(""),
             Line::from(Span::styled(
                 "This action cannot be undone!",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )),
         ];
 
-        let content = Paragraph::new(message)
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT)
-                    .border_style(Style::default().fg(Color::Red)),
-            );
+        let content = Paragraph::new(message).alignment(Alignment::Center).block(
+            Block::default()
+                .borders(Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(Color::Red)),
+        );
         frame.render_widget(content, chunks[1]);
 
         // Footer
@@ -492,16 +489,16 @@ impl Component for MainScreen {
         }
 
         // If edit view is active and focused, let it handle Tab for mode switching
-        if let Some(edit_view) = &self.edit_view {
-            if self.focused_pane == FocusedPane::Content {
-                // When editing a field, EditView captures ALL input
-                if edit_view.is_editing() {
-                    return self.edit_view.as_mut().unwrap().handle_key(key, ctx);
-                }
-                // When not editing but EditView is focused, let it handle Tab to start editing
-                if key.code == KeyCode::Tab {
-                    return self.edit_view.as_mut().unwrap().handle_key(key, ctx);
-                }
+        if let Some(edit_view) = &self.edit_view
+            && self.focused_pane == FocusedPane::Content
+        {
+            // When editing a field, EditView captures ALL input
+            if edit_view.is_editing() {
+                return self.edit_view.as_mut().unwrap().handle_key(key, ctx);
+            }
+            // When not editing but EditView is focused, let it handle Tab to start editing
+            if key.code == KeyCode::Tab {
+                return self.edit_view.as_mut().unwrap().handle_key(key, ctx);
             }
         }
 
@@ -555,13 +552,12 @@ impl Component for MainScreen {
                     return Ok(None);
                 }
             }
-            (KeyCode::Right, KeyModifiers::NONE) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+            (KeyCode::Right, KeyModifiers::NONE) | (KeyCode::Char('l'), KeyModifiers::NONE)
                 if self.focused_pane == FocusedPane::Navigation
-                    && (self.detail_view.is_some() || self.edit_view.is_some())
-                {
-                    self.focused_pane = FocusedPane::Content;
-                    return Ok(None);
-                }
+                    && (self.detail_view.is_some() || self.edit_view.is_some()) =>
+            {
+                self.focused_pane = FocusedPane::Content;
+                return Ok(None);
             }
             _ => {}
         }
@@ -597,7 +593,11 @@ impl Component for MainScreen {
                 return Ok(Some(action));
             }
 
-            Action::SecretLoaded { path, data, metadata } => {
+            Action::SecretLoaded {
+                path,
+                data,
+                metadata,
+            } => {
                 // Save selected version index if reloading the same secret
                 let saved_version_index = if let Some(existing_detail) = &self.detail_view {
                     if existing_detail.path() == path {
@@ -661,18 +661,18 @@ impl Component for MainScreen {
             // If EditView is not editing, it emits ScreenBack to close
             Action::CancelEdit => {
                 // Pass to EditView, it will handle cancel properly
-                if let Some(view) = &mut self.edit_view {
-                    if let Some(action) = view.update(action.clone(), ctx)? {
-                        // EditView wants to close (returned ScreenBack)
-                        // Process it here to close edit view and show detail view
-                        if matches!(action, Action::ScreenBack) {
-                            self.edit_view = None;
-                            // Keep detail_view visible, focus on it
-                            if self.detail_view.is_some() {
-                                self.focused_pane = FocusedPane::Content;
-                            } else {
-                                self.focused_pane = FocusedPane::Navigation;
-                            }
+                if let Some(view) = &mut self.edit_view
+                    && let Some(action) = view.update(action.clone(), ctx)?
+                {
+                    // EditView wants to close (returned ScreenBack)
+                    // Process it here to close edit view and show detail view
+                    if matches!(action, Action::ScreenBack) {
+                        self.edit_view = None;
+                        // Keep detail_view visible, focus on it
+                        if self.detail_view.is_some() {
+                            self.focused_pane = FocusedPane::Content;
+                        } else {
+                            self.focused_pane = FocusedPane::Navigation;
                         }
                     }
                 }
@@ -680,12 +680,12 @@ impl Component for MainScreen {
 
             // Copy selected value from detail view
             Action::CopySelectedValue => {
-                if let Some(detail_view) = &self.detail_view {
-                    if let Some(value) = detail_view.selected_value() {
-                        return Ok(Some(Action::CopyToClipboard {
-                            text: value.to_string(),
-                        }));
-                    }
+                if let Some(detail_view) = &self.detail_view
+                    && let Some(value) = detail_view.selected_value()
+                {
+                    return Ok(Some(Action::CopyToClipboard {
+                        text: value.to_string(),
+                    }));
                 }
             }
 
@@ -864,7 +864,8 @@ impl Component for MainScreen {
             self.focused_pane == FocusedPane::Navigation,
             content_chunks[0],
         );
-        self.navigation_pane.draw(frame, content_chunks[0], &nav_ctx);
+        self.navigation_pane
+            .draw(frame, content_chunks[0], &nav_ctx);
 
         // Render content pane (right)
         let content_ctx = RenderContext::new(

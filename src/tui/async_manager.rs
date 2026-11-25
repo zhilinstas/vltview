@@ -1,7 +1,7 @@
+use anyhow::Result;
 use std::collections::HashMap;
 use std::future::Future;
-use anyhow::Result;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
 use super::action::Action;
@@ -64,7 +64,11 @@ impl AsyncManager {
     ///
     /// # Returns
     /// Operation ID that can be used for tracking or cancellation
-    pub fn spawn<F>(&mut self, future: F, on_error: impl Fn(anyhow::Error) -> Action + Send + 'static) -> OperationId
+    pub fn spawn<F>(
+        &mut self,
+        future: F,
+        on_error: impl Fn(anyhow::Error) -> Action + Send + 'static,
+    ) -> OperationId
     where
         F: Future<Output = Result<Action>> + Send + 'static,
     {
@@ -85,7 +89,6 @@ impl AsyncManager {
         self.pending_ops.insert(op_id, handle);
         op_id
     }
-
 
     /// Poll for completed actions
     ///
@@ -129,4 +132,3 @@ impl Drop for AsyncManager {
         self.cancel_all();
     }
 }
-

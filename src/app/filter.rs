@@ -29,7 +29,7 @@ impl FilterEngine {
             .collect();
 
         // Sort by score descending (higher = better match)
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
 
         scored.into_iter().map(|(item, _)| item).collect()
     }
@@ -63,10 +63,10 @@ fn fuzzy_match(pattern: &str, text: &str) -> Option<i32> {
             }
 
             // Bonus for consecutive matches
-            if let Some(prev) = prev_match_idx {
-                if text_idx == prev + 1 {
-                    score += 10; // Consecutive character bonus
-                }
+            if let Some(prev) = prev_match_idx
+                && text_idx == prev + 1
+            {
+                score += 10; // Consecutive character bonus
             }
 
             // Bonus for matching at word boundaries (after '/', '_', '-', '.')

@@ -1,14 +1,14 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
-    Frame,
 };
+use ratatui_textarea::{Input, TextArea};
 use std::collections::HashMap;
-use tui_textarea::{Input, TextArea};
 
 use crate::tui::action::Action;
 use crate::tui::component::Component;
@@ -171,7 +171,7 @@ impl EditViewComponent {
             self.value_textarea
                 .set_cursor_style(Style::default().bg(Color::Green).fg(Color::Black));
             self.value_textarea
-                .move_cursor(tui_textarea::CursorMove::End);
+                .move_cursor(ratatui_textarea::CursorMove::End);
             self.mode = EditMode::EditValue;
         }
     }
@@ -182,7 +182,8 @@ impl EditViewComponent {
             self.key_textarea = TextArea::new(vec![key.clone()]);
             self.key_textarea
                 .set_cursor_style(Style::default().bg(Color::Green).fg(Color::Black));
-            self.key_textarea.move_cursor(tui_textarea::CursorMove::End);
+            self.key_textarea
+                .move_cursor(ratatui_textarea::CursorMove::End);
             self.mode = EditMode::EditKey;
         }
     }
@@ -240,7 +241,7 @@ impl EditViewComponent {
                     self.value_textarea
                         .set_cursor_style(Style::default().bg(Color::Green).fg(Color::Black));
                     self.value_textarea
-                        .move_cursor(tui_textarea::CursorMove::End);
+                        .move_cursor(ratatui_textarea::CursorMove::End);
                     self.mode = EditMode::EditValue;
                 }
             }
@@ -255,7 +256,8 @@ impl EditViewComponent {
                     self.key_textarea = TextArea::new(vec![key.clone()]);
                     self.key_textarea
                         .set_cursor_style(Style::default().bg(Color::Green).fg(Color::Black));
-                    self.key_textarea.move_cursor(tui_textarea::CursorMove::End);
+                    self.key_textarea
+                        .move_cursor(ratatui_textarea::CursorMove::End);
                     self.mode = EditMode::EditKey;
                 }
             }
@@ -685,29 +687,26 @@ impl Component for EditViewComponent {
                 // Navigate mode key handling
                 match (key.code, key.modifiers) {
                     // Navigation
-                    (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
+                    (KeyCode::Char('j'), KeyModifiers::NONE)
+                    | (KeyCode::Down, KeyModifiers::NONE) => {
                         self.move_down();
                         Ok(None)
                     }
-                    (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, KeyModifiers::NONE) => {
+                    (KeyCode::Char('k'), KeyModifiers::NONE)
+                    | (KeyCode::Up, KeyModifiers::NONE) => {
                         self.move_up();
                         Ok(None)
                     }
 
                     // Start editing value
-                    (KeyCode::Char('e'), KeyModifiers::NONE) | (KeyCode::Enter, KeyModifiers::NONE) => {
-                        Ok(Some(Action::StartEditValue))
-                    }
+                    (KeyCode::Char('e'), KeyModifiers::NONE)
+                    | (KeyCode::Enter, KeyModifiers::NONE) => Ok(Some(Action::StartEditValue)),
 
                     // Add field
-                    (KeyCode::Char('a'), KeyModifiers::NONE) => {
-                        Ok(Some(Action::AddField))
-                    }
+                    (KeyCode::Char('a'), KeyModifiers::NONE) => Ok(Some(Action::AddField)),
 
                     // Delete field
-                    (KeyCode::Char('d'), KeyModifiers::NONE) => {
-                        Ok(Some(Action::DeleteField))
-                    }
+                    (KeyCode::Char('d'), KeyModifiers::NONE) => Ok(Some(Action::DeleteField)),
 
                     // Save secret
                     (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
@@ -717,14 +716,10 @@ impl Component for EditViewComponent {
                     }
 
                     // Cancel/Exit
-                    (KeyCode::Esc, KeyModifiers::NONE) => {
-                        Ok(Some(Action::CancelEdit))
-                    }
+                    (KeyCode::Esc, KeyModifiers::NONE) => Ok(Some(Action::CancelEdit)),
 
                     // Help
-                    (KeyCode::Char('?'), KeyModifiers::NONE) => {
-                        Ok(Some(Action::ToggleHelp))
-                    }
+                    (KeyCode::Char('?'), KeyModifiers::NONE) => Ok(Some(Action::ToggleHelp)),
 
                     _ => Ok(None),
                 }
@@ -733,23 +728,17 @@ impl Component for EditViewComponent {
                 // Edit mode key handling
                 match (key.code, key.modifiers) {
                     // Confirm edit (save field)
-                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
-                        Ok(Some(Action::ConfirmEdit))
-                    }
+                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => Ok(Some(Action::ConfirmEdit)),
 
                     // Toggle between key/value
-                    (KeyCode::Tab, KeyModifiers::NONE) => {
-                        Ok(Some(Action::ToggleEditTarget))
-                    }
+                    (KeyCode::Tab, KeyModifiers::NONE) => Ok(Some(Action::ToggleEditTarget)),
 
                     // Cancel edit
-                    (KeyCode::Esc, KeyModifiers::NONE) => {
-                        Ok(Some(Action::CancelEdit))
-                    }
+                    (KeyCode::Esc, KeyModifiers::NONE) => Ok(Some(Action::CancelEdit)),
 
                     // All other keys are passed to TextArea
                     _ => {
-                        // Convert to tui_textarea::Input
+                        // Convert to ratatui_textarea::Input
                         let input = crossterm_to_textarea_input(key);
                         self.handle_textarea_input(input);
                         Ok(None)
@@ -844,7 +833,7 @@ impl Component for EditViewComponent {
 /// Convert crossterm KeyEvent to tui-textarea Input
 fn crossterm_to_textarea_input(key: KeyEvent) -> Input {
     use crossterm::event::{KeyCode as CKC, KeyModifiers as CKM};
-    use tui_textarea::{Input, Key};
+    use ratatui_textarea::{Input, Key};
 
     let key_code = match key.code {
         CKC::Char(c) => Key::Char(c),

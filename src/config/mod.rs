@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -80,10 +80,10 @@ impl Config {
             config.vault_namespace = Some(ns);
         }
 
-        if let Ok(skip_verify) = std::env::var("VAULT_SKIP_VERIFY") {
-            if skip_verify == "1" || skip_verify.to_lowercase() == "true" {
-                config.insecure = true;
-            }
+        if let Ok(skip_verify) = std::env::var("VAULT_SKIP_VERIFY")
+            && (skip_verify == "1" || skip_verify.to_lowercase() == "true")
+        {
+            config.insecure = true;
         }
 
         // Override with CLI arguments (highest priority)
@@ -112,14 +112,15 @@ impl Config {
             .context(format!("Failed to read config file: {}", path.display()))?;
 
         let config: Self =
-            serde_yaml::from_str(&contents).context("Failed to parse config file")?;
+            serde_norway::from_str(&contents).context("Failed to parse config file")?;
 
         Ok(config)
     }
 
     /// Try to load configuration from default location (~/.vltview.yaml)
     fn load_default_file() -> Result<Self> {
-        let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
+        let home =
+            std::env::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
 
         let config_path = home.join(".vltview.yaml");
 
@@ -132,7 +133,8 @@ impl Config {
 
     /// Load Vault token from cache (~/.vault-token)
     fn load_token_cache() -> Result<String> {
-        let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
+        let home =
+            std::env::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
 
         let token_path = home.join(".vault-token");
 
@@ -225,7 +227,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.timeout_secs, 30);
-        assert_eq!(config.cache_enabled, true);
+        assert!(config.cache_enabled);
         assert_eq!(config.cache_ttl, 300);
     }
 
@@ -237,23 +239,29 @@ mod tests {
 
     #[test]
     fn test_validate_missing_token() {
-        let mut config = Config::default();
-        config.vault_addr = "https://vault.example.com".to_string();
+        let config = Config {
+            vault_addr: "https://vault.example.com".to_string(),
+            ..Config::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_validate_success() {
-        let mut config = Config::default();
-        config.vault_addr = "https://vault.example.com".to_string();
-        config.vault_token = "test-token".to_string();
+        let config = Config {
+            vault_addr: "https://vault.example.com".to_string(),
+            vault_token: "test-token".to_string(),
+            ..Config::default()
+        };
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_base_url() {
-        let mut config = Config::default();
-        config.vault_addr = "https://vault.example.com/".to_string();
+        let config = Config {
+            vault_addr: "https://vault.example.com/".to_string(),
+            ..Config::default()
+        };
         assert_eq!(config.base_url(), "https://vault.example.com");
     }
 }

@@ -1,11 +1,13 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
-    Frame,
+    widgets::{
+        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    },
 };
 
 use crate::tui::action::{Action, ScrollDirection};
@@ -233,9 +235,7 @@ impl PolicyScreen {
             Span::raw(": View | "),
             Span::styled(
                 "Esc",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::raw(": Back"),
         ]))
@@ -267,9 +267,7 @@ impl PolicyScreen {
                 Span::styled("Name: ", Style::default().fg(Color::Gray)),
                 Span::styled(
                     policy_name,
-                    Style::default()
-                        .fg(color)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
             ]),
         ])
@@ -327,8 +325,9 @@ impl PolicyScreen {
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓"));
 
-            let mut scrollbar_state = ScrollbarState::new(total_lines.saturating_sub(viewport_height))
-                .position(self.scroll_offset);
+            let mut scrollbar_state =
+                ScrollbarState::new(total_lines.saturating_sub(viewport_height))
+                    .position(self.scroll_offset);
 
             let scrollbar_area = Rect {
                 x: area.x + area.width - 1,
@@ -342,7 +341,11 @@ impl PolicyScreen {
     }
 
     fn render_content_footer(&self, frame: &mut Frame, area: Rect) {
-        let content_lines = self.policy_content.as_ref().map(|c| c.lines().count()).unwrap_or(0);
+        let content_lines = self
+            .policy_content
+            .as_ref()
+            .map(|c| c.lines().count())
+            .unwrap_or(0);
         let viewport_height = area.height.saturating_sub(8) as usize;
         let scroll_info = if content_lines > viewport_height {
             format!(" | Line {}/{}", self.scroll_offset + 1, content_lines)
@@ -367,15 +370,10 @@ impl PolicyScreen {
             Span::raw(": Copy | "),
             Span::styled(
                 "Esc",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::raw(": Back"),
-            Span::styled(
-                scroll_info,
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(scroll_info, Style::default().fg(Color::DarkGray)),
         ]))
         .block(Block::default().borders(Borders::ALL));
 

@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 /// Log entry with timestamp and message
 #[derive(Debug, Clone)]
@@ -10,12 +10,14 @@ pub struct LogEntry {
 }
 
 /// Global log buffer
-static LOG_BUFFER: once_cell::sync::Lazy<Arc<RwLock<Vec<LogEntry>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(Vec::new())));
+static LOG_BUFFER: LazyLock<Arc<RwLock<Vec<LogEntry>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(Vec::new())));
 
 /// Add a log entry to the buffer
 pub fn add_log(level: &str, target: &str, message: String) {
-    let timestamp = chrono::Local::now().format("%H:%M:%S%.3f").to_string();
+    let timestamp = jiff::ZonedDateTime::now()
+        .strftime("%H:%M:%S%.3f")
+        .to_string();
     let entry = LogEntry {
         timestamp,
         level: level.to_string(),

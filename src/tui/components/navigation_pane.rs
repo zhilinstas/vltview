@@ -1,11 +1,11 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
-    Frame,
 };
 
 use crate::app::App;
@@ -264,14 +264,20 @@ impl NavigationPane {
                 Line::from(vec![
                     Span::styled("Filter: ", Style::default().fg(Color::Cyan)),
                     Span::styled(filter_text, Style::default().fg(Color::Yellow)),
-                    Span::styled(" (esc to clear, / to exit)", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        " (esc to clear, / to exit)",
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ])
             } else {
                 // Filter active but not editing
                 Line::from(vec![
                     Span::styled("Filter: ", Style::default().fg(Color::Cyan)),
                     Span::styled(&self.filter_input, Style::default().fg(Color::White)),
-                    Span::styled(" (/ to edit, esc to clear)", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        " (/ to edit, esc to clear)",
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ])
             };
             block = block.title_bottom(filter_footer);
@@ -305,30 +311,30 @@ impl Component for NavigationPane {
             (KeyCode::Up, KeyModifiers::NONE) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                 let action = self.move_up();
                 // Auto-preview if selected item is a secret
-                if self.is_selected_secret() {
-                    if let Some(item) = self.selected_item() {
-                        let current_path = ctx.app.state().current_path();
-                        let path = format!("{}/{}", current_path.trim_end_matches('/'), item);
-                        return Ok(Some(Action::ViewSecret {
-                            path,
-                            should_focus: false,
-                        }));
-                    }
+                if self.is_selected_secret()
+                    && let Some(item) = self.selected_item()
+                {
+                    let current_path = ctx.app.state().current_path();
+                    let path = format!("{}/{}", current_path.trim_end_matches('/'), item);
+                    return Ok(Some(Action::ViewSecret {
+                        path,
+                        should_focus: false,
+                    }));
                 }
                 Ok(action)
             }
             (KeyCode::Down, KeyModifiers::NONE) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                 let action = self.move_down();
                 // Auto-preview if selected item is a secret
-                if self.is_selected_secret() {
-                    if let Some(item) = self.selected_item() {
-                        let current_path = ctx.app.state().current_path();
-                        let path = format!("{}/{}", current_path.trim_end_matches('/'), item);
-                        return Ok(Some(Action::ViewSecret {
-                            path,
-                            should_focus: false,
-                        }));
-                    }
+                if self.is_selected_secret()
+                    && let Some(item) = self.selected_item()
+                {
+                    let current_path = ctx.app.state().current_path();
+                    let path = format!("{}/{}", current_path.trim_end_matches('/'), item);
+                    return Ok(Some(Action::ViewSecret {
+                        path,
+                        should_focus: false,
+                    }));
                 }
                 Ok(action)
             }

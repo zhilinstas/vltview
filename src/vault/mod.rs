@@ -159,9 +159,11 @@ mod tests {
 
     #[test]
     fn test_vault_client_creation() {
-        let mut config = Config::default();
-        config.vault_addr = "https://vault.example.com".to_string();
-        config.vault_token = "test-token".to_string();
+        let config = Config {
+            vault_addr: "https://vault.example.com".to_string(),
+            vault_token: "test-token".to_string(),
+            ..Config::default()
+        };
 
         let result = VaultClient::new(config);
         assert!(result.is_ok());

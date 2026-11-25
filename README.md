@@ -84,7 +84,11 @@ VltView follows a layered component-based architecture:
 
 ### From Source
 
+Requires Rust 1.100 or newer. The exact toolchain is pinned in `mise.toml`;
+with [mise](https://mise.jdx.dev) installed, `mise install` sets it up.
+
 ```bash
+mise install            # optional: pinned Rust toolchain
 cargo build --release
 sudo cp target/release/vltview /usr/local/bin/
 ```
@@ -143,6 +147,16 @@ insecure_skip_verify: false
 | `Ctrl+C` | Quit application |
 
 ## Development
+
+### Toolchain
+
+Tool versions (Rust, rustfmt, clippy, cargo-audit) are pinned in `mise.toml`
+and used by CI and the release workflow.
+
+```bash
+mise install     # install the pinned toolchain
+mise run ci      # format check, clippy, tests, dependency audit
+```
 
 ### Run Tests
 

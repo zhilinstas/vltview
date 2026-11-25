@@ -7,7 +7,7 @@ use tokio::sync::Semaphore;
 use super::audit_log;
 use super::auth::AuthManager;
 use super::response::{FullSecretMetadata, ListResponse, VaultResponse, VaultSecret};
-use super::sanitize::{sanitize_vault_path, sanitize_vault_error};
+use super::sanitize::{sanitize_vault_error, sanitize_vault_path};
 
 /// KV Engine API client for KV2 secrets with rate limiting
 #[derive(Clone)]
@@ -95,7 +95,10 @@ impl KvEngine {
         // Check if the response is successful
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             let sanitized_error = sanitize_vault_error(status.as_u16(), &error_text);
             anyhow::bail!("{}", sanitized_error);
         }
@@ -155,7 +158,10 @@ impl KvEngine {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             let sanitized_error = sanitize_vault_error(status.as_u16(), &error_text);
             anyhow::bail!("{}", sanitized_error);
         }
@@ -184,7 +190,10 @@ impl KvEngine {
         // Check if the response is successful
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             let sanitized_error = sanitize_vault_error(status.as_u16(), &error_text);
             anyhow::bail!("{}", sanitized_error);
         }
@@ -194,4 +203,3 @@ impl KvEngine {
         Ok(vault_resp.data)
     }
 }
-

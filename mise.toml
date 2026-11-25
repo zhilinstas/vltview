@@ -1,0 +1,40 @@
+# Project toolchain, managed by mise (https://mise.jdx.dev).
+#
+#   mise install     # install everything below
+#   mise run ci      # the same checks CI runs
+#
+# This file is the single source of truth for tool versions: CI and the
+# release workflow install from it via jdx/mise-action. Keep `rust` here in
+# sync with `rust-version` in Cargo.toml.
+
+min_version = "2026.1.0"
+
+[tools]
+rust = { version = "1.100.0", profile = "minimal", components = "rustfmt,clippy" }
+# cargo-binstall lets mise fetch prebuilt binaries for the cargo: tools below
+# instead of compiling them from source.
+cargo-binstall = "1.26.2"
+"cargo:cargo-audit" = "0.22.2"
+
+[tasks.fmt-check]
+description = "Check formatting"
+run = "cargo fmt --all -- --check"
+
+# `-A dead_code` is temporary: 20 unused or half-wired items predate this gate
+# (unhandled Action variants, FocusState, the cache stub). Drop the flag once
+# they are wired up or deleted. Plain `cargo build` still reports them.
+[tasks.clippy]
+description = "Lint with clippy, warnings are errors"
+run = "cargo clippy --all-targets --all-features --locked -- -D warnings -A dead_code"
+
+[tasks.test]
+description = "Run the test suite"
+run = "cargo test --locked"
+
+[tasks.audit]
+description = "Check Cargo.lock against the RustSec advisory database"
+run = "cargo audit"
+
+[tasks.ci]
+description = "Everything CI checks: format, lint, test, audit"
+depends = ["fmt-check", "clippy", "test", "audit"]

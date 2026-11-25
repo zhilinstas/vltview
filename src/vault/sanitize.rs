@@ -1,10 +1,10 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Sanitize and validate Vault paths to prevent path traversal attacks
 pub fn sanitize_vault_path(path: &str) -> Result<String> {
     // Remove dangerous path traversal sequences
     let mut sanitized = path
-        .replace("..", "")  // Remove parent directory references
+        .replace("..", "") // Remove parent directory references
         .replace("//", "/") // Remove double slashes
         .trim()
         .to_string();
@@ -95,7 +95,11 @@ mod tests {
             let result = sanitize_vault_path(path);
             assert!(result.is_ok(), "Path should be sanitized: {}", path);
             let sanitized = result.unwrap();
-            assert!(!sanitized.contains(".."), "Path still contains '..': {}", sanitized);
+            assert!(
+                !sanitized.contains(".."),
+                "Path still contains '..': {}",
+                sanitized
+            );
         }
     }
 
@@ -118,22 +122,23 @@ mod tests {
 
     #[test]
     fn test_control_characters_rejected() {
-        let paths_with_control = vec![
-            "/secret/my\0app",
-            "/secret/my\napp",
-            "/secret/my\rapp",
-        ];
+        let paths_with_control = vec!["/secret/my\0app", "/secret/my\napp", "/secret/my\rapp"];
 
         for path in paths_with_control {
             let result = sanitize_vault_path(path);
-            assert!(result.is_err(), "Control characters should be rejected: {:?}", path);
+            assert!(
+                result.is_err(),
+                "Control characters should be rejected: {:?}",
+                path
+            );
         }
     }
 
     #[test]
     fn test_error_sanitization() {
         // Test that errors don't leak internal details
-        let error = sanitize_vault_error(403, "permission denied: invalid ACL policy 'secret/admin'");
+        let error =
+            sanitize_vault_error(403, "permission denied: invalid ACL policy 'secret/admin'");
         assert!(!error.contains("ACL"));
         assert!(!error.contains("secret/admin"));
         assert_eq!(error, "Access denied - insufficient permissions");

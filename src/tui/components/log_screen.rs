@@ -1,17 +1,17 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
-    Frame,
 };
 
 use crate::tui::action::{Action, ScrollDirection};
 use crate::tui::component::Component;
 use crate::tui::context::{ComponentContext, RenderContext};
-use crate::tui::log_buffer::{get_logs, clear_logs};
+use crate::tui::log_buffer::{clear_logs, get_logs};
 
 /// Log viewer screen component
 ///

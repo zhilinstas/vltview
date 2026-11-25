@@ -1,6 +1,5 @@
 /// Secure audit logging module
 /// Logs actions without exposing sensitive data like tokens or secret values
-
 use std::collections::HashMap;
 
 /// Redact sensitive information from paths and data for logging
@@ -14,8 +13,8 @@ pub fn redact_secret_value(value: &str) -> String {
 
 /// Redact secret data for logging - shows keys but not values
 pub fn redact_secret_data(data: &HashMap<String, String>) -> HashMap<String, String> {
-    data.iter()
-        .map(|(k, _v)| (k.clone(), "***REDACTED***".to_string()))
+    data.keys()
+        .map(|k| (k.clone(), "***REDACTED***".to_string()))
         .collect()
 }
 
@@ -90,11 +89,7 @@ pub fn log_policy_read(policy_name: &str) {
 
 /// Log policy list operation
 pub fn log_policy_list(count: usize) {
-    tracing::info!(
-        action = "policy.list",
-        count = count,
-        "Listed policies"
-    );
+    tracing::info!(action = "policy.list", count = count, "Listed policies");
 }
 
 /// Log authentication attempts (success only, failures are security events)
@@ -126,4 +121,3 @@ pub fn log_security_event(event: &str, details: &str) {
         "Security event logged"
     );
 }
-

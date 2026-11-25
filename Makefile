@@ -1,4 +1,4 @@
-.PHONY: help build run test clean docker-up docker-down docker-logs docker-clean fmt clippy check install dev docs
+.PHONY: help build run test clean docker-up docker-down docker-logs docker-clean fmt clippy check install dev docs audit ci setup
 
 # Default target
 .DEFAULT_GOAL := help
@@ -26,6 +26,11 @@ help: ## Show this help message
 	@echo ""
 	@awk 'BEGIN {FS = ":.*##"; printf ""} /^[a-zA-Z_-]+:.*?##/ { printf "  $(YELLOW)%-20s$(NC) %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@echo ""
+
+##@ Setup
+
+setup: ## Install the pinned toolchain (Rust, rustfmt, clippy, cargo-audit) with mise
+	mise install
 
 ##@ Building
 
@@ -156,6 +161,14 @@ clippy-fix: ## Run clippy and apply fixes
 	$(CARGO) clippy --fix --allow-dirty --allow-staged
 
 lint: fmt-check clippy ## Run all linters
+
+audit: ## Check dependencies against the RustSec advisory database
+	@echo "$(BLUE)Auditing dependencies...$(NC)"
+	$(CARGO) audit
+	@echo "$(GREEN)✓ No known vulnerabilities$(NC)"
+
+ci: ## Run the same checks as CI (format, clippy -D warnings, test, audit)
+	mise run ci
 
 ##@ Cleaning
 

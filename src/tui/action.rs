@@ -119,10 +119,7 @@ pub enum Action {
     // SECRET ACTIONS
     // ═══════════════════════════════════════════════════════════════
     /// Load and view a secret (triggers async operation)
-    ViewSecret {
-        path: String,
-        should_focus: bool,
-    },
+    ViewSecret { path: String, should_focus: bool },
 
     /// Secret loaded successfully (async completion)
     SecretLoaded {
@@ -288,7 +285,7 @@ pub enum Action {
     // INPUT FORWARDING (for TextArea)
     // ═══════════════════════════════════════════════════════════════
     /// Forward key to TextArea component
-    TextInput { input: tui_textarea::Input },
+    TextInput { input: ratatui_textarea::Input },
 
     // ═══════════════════════════════════════════════════════════════
     // COMPOSITE/BATCH ACTIONS

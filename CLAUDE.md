@@ -8,6 +8,15 @@ VltView is a terminal UI (TUI) application for browsing and managing HashiCorp V
 
 ## Build & Development Commands
 
+### Toolchain
+
+Tool versions are pinned in `mise.toml` (Rust 1.100.0 with rustfmt and clippy, cargo-audit). CI and the release workflow install from the same file via `jdx/mise-action`, so bump versions there and keep `rust-version` in `Cargo.toml` in sync. The crate uses edition 2024.
+
+```bash
+mise install            # Install the pinned toolchain (also: make setup)
+mise run ci             # What CI runs: fmt-check, clippy -D warnings, test, audit (also: make ci)
+```
+
 ### Building
 ```bash
 make build              # Debug build
@@ -35,6 +44,7 @@ make test-specific TEST=test_name   # Run specific test
 make fmt           # Format code with rustfmt
 make clippy        # Run clippy linter
 make lint          # Run both fmt-check and clippy
+make audit         # Check Cargo.lock against the RustSec advisory database
 make pre-commit    # Full pre-commit check (fmt, clippy, test, build)
 ```
 

@@ -2,9 +2,9 @@ use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 use std::time::Duration;
 
@@ -82,10 +82,10 @@ impl Tui {
             self.render()?;
 
             // Poll for events with timeout
-            if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
-                    self.handle_key_event(key).await?;
-                }
+            if event::poll(Duration::from_millis(100))?
+                && let Event::Key(key) = event::read()?
+            {
+                self.handle_key_event(key).await?;
             }
 
             // Poll for async operation completions
@@ -136,7 +136,8 @@ impl Tui {
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
         // Global quit with Ctrl+C (works from anywhere)
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
-            self.root.process_action(action::Action::Quit, &mut self.app)?;
+            self.root
+                .process_action(action::Action::Quit, &mut self.app)?;
             return Ok(());
         }
 

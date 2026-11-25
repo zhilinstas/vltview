@@ -106,7 +106,6 @@ impl PathState {
     }
 }
 
-
 /// Cache manager for secrets
 #[derive(Debug)]
 pub struct CacheManager {

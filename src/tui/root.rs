@@ -7,7 +7,7 @@ use crate::tui::action::Action;
 use crate::tui::async_manager::AsyncManager;
 use crate::tui::component::Component;
 use crate::tui::components::{HelpOverlay, LogScreen, MainScreen, PolicyScreen};
-use crate::tui::context::{ComponentContext, FocusState, RenderContext, ActionSender};
+use crate::tui::context::{ActionSender, ComponentContext, FocusState, RenderContext};
 
 /// Active screen in the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,13 +138,13 @@ impl Root {
             Action::ViewSecret { path, should_focus } => {
                 let path = path.clone();
                 let should_focus = *should_focus;
-                // Drop ctx before mutable borrow
-                drop(ctx);
                 self.spawn_load_secret(app, path, should_focus);
                 // Set loading state
                 let action_tx = self.action_sender();
                 let mut ctx = ComponentContext::new(app, &self.focus, &action_tx);
-                let _ = self.main_screen.update(Action::SetLoading { loading: true }, &mut ctx);
+                let _ = self
+                    .main_screen
+                    .update(Action::SetLoading { loading: true }, &mut ctx);
                 return Ok(());
             }
 
@@ -160,31 +160,25 @@ impl Root {
 
             Action::SaveSecret { path, data } => {
                 // Spawn async save operation
-                let _ = self.main_screen.update(
-                    Action::SetLoading { loading: true },
-                    &mut ctx,
-                );
-                drop(ctx);
+                let _ = self
+                    .main_screen
+                    .update(Action::SetLoading { loading: true }, &mut ctx);
                 self.spawn_save_secret(app, path.clone(), data.clone());
                 return Ok(());
             }
 
             Action::ViewSecretVersion { path, version } => {
-                let _ = self.main_screen.update(
-                    Action::SetLoading { loading: true },
-                    &mut ctx,
-                );
-                drop(ctx);
+                let _ = self
+                    .main_screen
+                    .update(Action::SetLoading { loading: true }, &mut ctx);
                 self.spawn_load_secret_version(app, path.clone(), *version);
                 return Ok(());
             }
 
             Action::CreateFromVersion { path, version } => {
-                let _ = self.main_screen.update(
-                    Action::SetLoading { loading: true },
-                    &mut ctx,
-                );
-                drop(ctx);
+                let _ = self
+                    .main_screen
+                    .update(Action::SetLoading { loading: true }, &mut ctx);
                 self.spawn_load_version_for_edit(app, path.clone(), *version);
                 return Ok(());
             }
@@ -196,11 +190,9 @@ impl Root {
 
             Action::NavigateTo { path } => {
                 // Set loading state and spawn async navigation
-                let _ = self.main_screen.update(
-                    Action::SetLoading { loading: true },
-                    &mut ctx,
-                );
-                drop(ctx);
+                let _ = self
+                    .main_screen
+                    .update(Action::SetLoading { loading: true }, &mut ctx);
                 self.spawn_navigate_to(app, path.clone());
                 return Ok(());
             }
@@ -217,11 +209,9 @@ impl Root {
                     } else {
                         "/".to_string()
                     };
-                    let _ = self.main_screen.update(
-                        Action::SetLoading { loading: true },
-                        &mut ctx,
-                    );
-                    drop(ctx);
+                    let _ = self
+                        .main_screen
+                        .update(Action::SetLoading { loading: true }, &mut ctx);
                     self.spawn_navigate_to(app, parent);
                 }
                 return Ok(());
@@ -229,22 +219,18 @@ impl Root {
 
             Action::Refresh => {
                 // Spawn async operation to reload current directory from Vault
-                let _ = self.main_screen.update(
-                    Action::SetLoading { loading: true },
-                    &mut ctx,
-                );
-                drop(ctx);
+                let _ = self
+                    .main_screen
+                    .update(Action::SetLoading { loading: true }, &mut ctx);
                 self.spawn_refresh(app);
                 return Ok(());
             }
 
             Action::HistoryBack => {
                 if let Some(path) = app.state().go_back() {
-                    let _ = self.main_screen.update(
-                        Action::SetLoading { loading: true },
-                        &mut ctx,
-                    );
-                    drop(ctx);
+                    let _ = self
+                        .main_screen
+                        .update(Action::SetLoading { loading: true }, &mut ctx);
                     self.spawn_navigate_to(app, path);
                 }
                 return Ok(());
@@ -252,11 +238,9 @@ impl Root {
 
             Action::HistoryForward => {
                 if let Some(path) = app.state().go_forward() {
-                    let _ = self.main_screen.update(
-                        Action::SetLoading { loading: true },
-                        &mut ctx,
-                    );
-                    drop(ctx);
+                    let _ = self
+                        .main_screen
+                        .update(Action::SetLoading { loading: true }, &mut ctx);
                     self.spawn_navigate_to(app, path);
                 }
                 return Ok(());
@@ -352,11 +336,9 @@ impl Root {
                 }
             }
 
-            Action::CopyPolicy => {
-                if self.active_screen == ActiveScreen::Policy {
-                    // This action is handled by the old Tui for now (clipboard integration)
-                    // In future phases, this would be handled by Root with a clipboard service
-                }
+            Action::CopyPolicy if self.active_screen == ActiveScreen::Policy => {
+                // This action is handled by the old Tui for now (clipboard integration)
+                // In future phases, this would be handled by Root with a clipboard service
             }
 
             _ => {
@@ -448,10 +430,7 @@ impl Root {
                 nav.navigate_to(path.clone()).await?;
                 // Emit action to update UI after state has been updated
                 Ok(Action::Batch {
-                    actions: vec![
-                        Action::StateUpdated,
-                        Action::SetLoading { loading: false },
-                    ],
+                    actions: vec![Action::StateUpdated, Action::SetLoading { loading: false }],
                 })
             },
             |e| Action::SetError {
@@ -469,10 +448,7 @@ impl Root {
                 nav.refresh().await?;
                 // Emit action to update UI after state has been updated
                 Ok(Action::Batch {
-                    actions: vec![
-                        Action::StateUpdated,
-                        Action::SetLoading { loading: false },
-                    ],
+                    actions: vec![Action::StateUpdated, Action::SetLoading { loading: false }],
                 })
             },
             |e| Action::SetError {
@@ -540,7 +516,12 @@ impl Root {
     }
 
     /// Spawn async operation to save a secret
-    fn spawn_save_secret(&mut self, app: &App, path: String, data: std::collections::HashMap<String, String>) {
+    fn spawn_save_secret(
+        &mut self,
+        app: &App,
+        path: String,
+        data: std::collections::HashMap<String, String>,
+    ) {
         let secret_service = app.secret_service().clone();
 
         self.async_manager.spawn(
@@ -554,11 +535,11 @@ impl Root {
                         Action::SetStatus {
                             message: format!("Saved: {}", path),
                         },
-                        Action::Refresh,  // Refresh navigation list to show new secret
+                        Action::Refresh, // Refresh navigation list to show new secret
                         Action::ViewSecret {
                             path: path.clone(),
                             should_focus: false,
-                        },  // Reload secret to show new version in history
+                        }, // Reload secret to show new version in history
                     ],
                 })
             },
@@ -579,10 +560,7 @@ impl Root {
 
                 Ok(Action::Batch {
                     actions: vec![
-                        Action::SecretVersionLoaded {
-                            version,
-                            data,
-                        },
+                        Action::SecretVersionLoaded { version, data },
                         Action::SetLoading { loading: false },
                     ],
                 })

@@ -64,12 +64,10 @@ impl ClipboardManager {
                     );
                     audit_log::log_security_event(
                         "clipboard.auto_cleared",
-                        &format!("Clipboard cleared after {}s timeout", timeout_secs)
+                        &format!("Clipboard cleared after {}s timeout", timeout_secs),
                     );
                 } else {
-                    tracing::debug!(
-                        "Clipboard not cleared - content changed by user"
-                    );
+                    tracing::debug!("Clipboard not cleared - content changed by user");
                 }
             }
         });
@@ -80,8 +78,7 @@ impl ClipboardManager {
     /// Immediately clear the clipboard
     pub async fn clear(&mut self) -> Result<()> {
         let mut clip = self.clipboard.lock().await;
-        clip.set_text("")
-            .context("Failed to clear clipboard")?;
+        clip.set_text("").context("Failed to clear clipboard")?;
         tracing::debug!("Clipboard manually cleared");
         Ok(())
     }

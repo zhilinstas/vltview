@@ -43,7 +43,9 @@ impl PolicyApi {
         let url = format!("{}/v1/sys/policies/acl", self.base_url);
 
         // Vault LIST endpoint requires the "LIST" HTTP method
-        let mut req = self.client.request(reqwest::Method::from_bytes(b"LIST")?, &url);
+        let mut req = self
+            .client
+            .request(reqwest::Method::from_bytes(b"LIST")?, &url);
         req = self.auth.add_auth_header(req);
 
         if let Some(ns) = &self.namespace {
@@ -72,7 +74,10 @@ impl PolicyApi {
             }
         } else {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             let sanitized_error = sanitize_vault_error(status.as_u16(), &error_text);
             anyhow::bail!("{}", sanitized_error);
         }
@@ -110,7 +115,10 @@ impl PolicyApi {
             }
         } else {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             let sanitized_error = sanitize_vault_error(status.as_u16(), &error_text);
             anyhow::bail!("{}", sanitized_error);
         }

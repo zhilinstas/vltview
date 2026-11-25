@@ -1,9 +1,9 @@
 use ratatui::layout::Rect;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::app::App;
 use super::action::{Action, FocusedPane};
 use super::component::ComponentId;
+use crate::app::App;
 
 /// Immutable context available during event handling
 ///
@@ -30,7 +30,6 @@ impl<'a> ComponentContext<'a> {
         }
     }
 }
-
 
 /// Context for rendering components (no mutation)
 ///
@@ -144,7 +143,6 @@ impl Default for FocusState {
 
 /// Channel for sending actions (typically from async tasks)
 pub type ActionSender = UnboundedSender<Action>;
-
 
 #[cfg(test)]
 mod tests {
