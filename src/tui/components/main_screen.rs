@@ -1,7 +1,9 @@
 use crate::app::navigation::child_path;
 use crate::tui::action::{Action, FocusedPane};
 use crate::tui::component::Component;
-use crate::tui::components::popup::{border_color, centered, spinner_frame, truncate, wrap};
+use crate::tui::components::popup::{
+    border_color, centered, spinner_frame, truncate, wrap, wrap_words,
+};
 use crate::tui::components::{DetailViewComponent, EditViewComponent, NavigationPane};
 use crate::tui::context::{ComponentContext, RenderContext};
 use crate::tui::keymap::{self, Context};
@@ -15,6 +17,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use ratatui_textarea::{Input, Key, TextArea};
+use std::collections::VecDeque;
 
 /// A secret waiting for its delete to be confirmed
 struct DeleteTarget {
@@ -55,8 +58,16 @@ pub struct MainScreen {
     /// Status message (temporary)
     status_message: Option<String>,
 
-    /// Error message
+    /// Why the selected secret, or the version asked for, is not shown.
+    /// It takes the secret's place in the content pane and goes when the
+    /// cursor moves on.
     error_message: Option<String>,
+
+    /// Errors about anything else (a folder that could not be opened, a
+    /// delete or a copy that failed). They are shown one at a time over the
+    /// screen, never inside an editor or a secret they have nothing to do
+    /// with, and each names what it is about.
+    notices: VecDeque<String>,
 
     /// Whether a request to Vault is in flight
     is_loading: bool,
@@ -91,6 +102,7 @@ impl MainScreen {
             create_error: None,
             status_message: None,
             error_message: None,
+            notices: VecDeque::new(),
             is_loading: false,
             delete_confirmation: None,
             loading_secret: None,
@@ -105,6 +117,9 @@ impl MainScreen {
 
     /// The keys that work right now, for the footer
     fn footer_contexts(&self) -> Vec<Context> {
+        if !self.notices.is_empty() {
+            return vec![Context::Notice];
+        }
         if self.delete_confirmation.is_some() {
             return vec![Context::DeleteConfirm];
         }
@@ -184,6 +199,14 @@ impl MainScreen {
                 input.input(prompt_input(key));
                 Ok(None)
             }
+        }
+    }
+
+    /// Keys while an error message is over the screen: it is closed, and
+    /// nothing else happens
+    fn handle_notice(&mut self, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+            self.notices.pop_front();
         }
     }
 
@@ -380,6 +403,56 @@ impl MainScreen {
         }
     }
 
+    /// Render an error message over the screen.
+    ///
+    /// The width is fixed and the message is wrapped, so all of it is on
+    /// screen whatever the terminal size.
+    fn render_notice(frame: &mut Frame, area: Rect, message: &str, waiting: usize) {
+        let width = 62;
+        let inner_width = (width.min(area.width) as usize).saturating_sub(4);
+
+        let mut text = vec![Line::from("")];
+        text.extend(
+            wrap_words(message, inner_width)
+                .into_iter()
+                .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White)))),
+        );
+        text.push(Line::from(""));
+        let mut close = vec![
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" close"),
+        ];
+        if waiting > 0 {
+            close.push(Span::styled(
+                format!("   {waiting} more"),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        text.push(Line::from(close));
+
+        let popup = centered(width, text.len() as u16 + 2, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .title(Span::styled(
+                " Error ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .block(block),
+            popup,
+        );
+    }
+
     /// Render delete confirmation dialog.
     ///
     /// The size is fixed, so the path and the warning are on screen whatever
@@ -482,6 +555,12 @@ impl Component for MainScreen {
     fn handle_key(&mut self, key: KeyEvent, ctx: &ComponentContext) -> Result<Option<Action>> {
         // Clear status message on any key
         self.status_message = None;
+
+        // An error message is read and closed before anything else
+        if !self.notices.is_empty() {
+            self.handle_notice(key);
+            return Ok(None);
+        }
 
         // Handle delete confirmation first
         if self.delete_confirmation.is_some() {
@@ -596,7 +675,7 @@ impl Component for MainScreen {
     fn handle_paste(&mut self, text: &str, ctx: &ComponentContext) -> Result<Option<Action>> {
         // Pasted text goes into the text input that has focus, if there is
         // one. Anywhere else it is dropped: it must never run as commands.
-        if self.delete_confirmation.is_some() {
+        if self.delete_confirmation.is_some() || !self.notices.is_empty() {
             return Ok(None);
         }
 
@@ -816,10 +895,29 @@ impl Component for MainScreen {
                 // Ignore a version that belongs to a secret the user has
                 // since left: showing it here would let it be saved over
                 // the secret now on screen.
+                // So is a version the user asked for before picking another
+                // one: its result may arrive last.
                 if let Some(detail_view) = &mut self.detail_view
                     && detail_view.path() == path
+                    && detail_view.version_arrived(version)
                 {
                     detail_view.load_version(version, data);
+                }
+            }
+
+            // A version that is no longer awaited failed to load: of no
+            // interest. One that is awaited takes the pane, like a secret
+            // that could not be loaded.
+            Action::VersionLoadFailed {
+                path,
+                version,
+                message,
+            } => {
+                if let Some(detail_view) = &mut self.detail_view
+                    && detail_view.path() == path
+                    && detail_view.version_arrived(version)
+                {
+                    self.error_message = Some(message);
                 }
             }
 
@@ -829,10 +927,12 @@ impl Component for MainScreen {
                 version,
                 data,
             } => {
-                // Only open the editor if the user is still on that secret
-                // and has not started another edit in the meantime.
-                if let Some(detail_view) = &self.detail_view
+                // Only open the editor if the user is still on that secret,
+                // still waits for this version, and has not started another
+                // edit in the meantime.
+                if let Some(detail_view) = &mut self.detail_view
                     && detail_view.path() == path
+                    && detail_view.version_arrived(version)
                     && self.edit_view.is_none()
                 {
                     let mut edit_view = EditViewComponent::new(path, data);
@@ -890,13 +990,19 @@ impl Component for MainScreen {
                 self.status_message = None;
             }
 
-            Action::SetError { message } => {
-                // With an edit open the error is shown inside it, so the
-                // fields being edited stay on screen
-                match &mut self.edit_view {
-                    Some(edit_view) => edit_view.set_error(Some(message)),
-                    None => self.error_message = Some(message),
-                }
+            // A save that failed is shown inside the editor it came from,
+            // so the fields stay on screen. If that editor is gone, or shows
+            // another secret, the failure is still said, but over the screen.
+            Action::SaveFailed { path, message } => match &mut self.edit_view {
+                Some(edit_view) if edit_view.path() == path => edit_view.set_error(Some(message)),
+                _ => self.notices.push_back(message),
+            },
+
+            // Errors that are not about what the content pane shows
+            Action::DeleteFailed { message, .. }
+            | Action::FolderListFailed { message, .. }
+            | Action::CopyFailed { message } => {
+                self.notices.push_back(message);
             }
 
             Action::ClearError => {
@@ -962,11 +1068,19 @@ impl Component for MainScreen {
         if let Some(target) = &self.delete_confirmation {
             Self::render_delete_confirmation(frame, area, target);
         }
+
+        // An error message is on top of everything
+        if let Some(message) = self.notices.front() {
+            Self::render_notice(frame, area, message, self.notices.len() - 1);
+        }
     }
 
     fn captures_input(&self) -> bool {
-        // Capture input when in create secret mode or delete confirmation
-        self.create_input.is_some() || self.delete_confirmation.is_some()
+        // Capture input in create secret mode, in the delete confirmation
+        // and while an error message is shown
+        self.create_input.is_some()
+            || self.delete_confirmation.is_some()
+            || !self.notices.is_empty()
     }
 }
 
@@ -1031,6 +1145,38 @@ mod tests {
         Action::SelectionChanged {
             secret: path.map(str::to_string),
             source: SelectionSource::Cursor,
+        }
+    }
+
+    /// Ask for `version` of the secret on screen from its version list, with
+    /// Enter (view) or `n` (edit a copy), as a user does
+    fn ask_for_version(
+        screen: &mut MainScreen,
+        ctx: &ComponentContext,
+        version: u64,
+        with: KeyCode,
+    ) -> Option<Action> {
+        let detail = screen.detail_view.as_ref().expect("a secret is on screen");
+        let newest = detail.current_version().expect("its history is known");
+        let in_list = detail.context() == Context::Versions;
+
+        screen.focused_pane = FocusedPane::Content;
+        if !in_list {
+            screen.handle_key(key(KeyCode::Char('l')), ctx).unwrap();
+        }
+        // Newest first
+        screen.handle_key(key(KeyCode::Home), ctx).unwrap();
+        for _ in version..newest {
+            screen.handle_key(key(KeyCode::Down), ctx).unwrap();
+        }
+        screen.handle_key(key(with), ctx).unwrap()
+    }
+
+    fn version_loaded(path: &str, version: u64, value: serde_json::Value) -> Action {
+        Action::SecretVersionLoaded {
+            path: path.to_string(),
+            version,
+            data: secret(value),
         }
     }
 
@@ -1138,8 +1284,9 @@ mod tests {
             assert!(screen.edit_view.is_some());
 
             // A failed save reports an error and keeps the edit buffer
-            let failed = Action::SetError {
-                message: "Failed to save secret: Access denied".to_string(),
+            let failed = Action::SaveFailed {
+                path: "/a".to_string(),
+                message: "Could not save /a: Access denied".to_string(),
             };
             screen.update(failed, ctx).unwrap();
             assert!(screen.edit_view.is_some());
@@ -1162,8 +1309,9 @@ mod tests {
                 .unwrap();
             screen.update(Action::EditSecret, ctx).unwrap();
 
-            let failed = Action::SetError {
-                message: "Failed to save secret: Access denied".to_string(),
+            let failed = Action::SaveFailed {
+                path: "/a".to_string(),
+                message: "Could not save /a: Access denied".to_string(),
             };
             screen.update(failed, ctx).unwrap();
 
@@ -1179,24 +1327,19 @@ mod tests {
         // Regression: SecretVersionLoaded carried no path, so an old version
         // of A could be loaded into B's view and then saved over B.
         with_screen(|screen, ctx| {
-            screen
-                .update(loaded("/b", json!({"b": "current"})), ctx)
-                .unwrap();
+            screen.update(loaded_with_versions("/b", 3), ctx).unwrap();
+            let asked = ask_for_version(screen, ctx, 1, KeyCode::Enter);
+            assert!(
+                matches!(asked, Some(Action::ViewSecretVersion { version: 1, .. })),
+                "{asked:?}"
+            );
 
-            let stale = Action::SecretVersionLoaded {
-                path: "/a".to_string(),
-                version: 1,
-                data: secret(json!({"a": "old"})),
-            };
+            let stale = version_loaded("/a", 1, json!({"a": "old"}));
             screen.update(stale, ctx).unwrap();
             let detail = screen.detail_view.as_ref().unwrap();
-            assert_eq!(detail.secret_data(), secret(json!({"b": "current"})));
+            assert_eq!(detail.secret_data(), secret(json!({"k": "v"})));
 
-            let matching = Action::SecretVersionLoaded {
-                path: "/b".to_string(),
-                version: 1,
-                data: secret(json!({"b": "old"})),
-            };
+            let matching = version_loaded("/b", 1, json!({"b": "old"}));
             screen.update(matching, ctx).unwrap();
             let detail = screen.detail_view.as_ref().unwrap();
             assert_eq!(detail.secret_data(), secret(json!({"b": "old"})));
@@ -1204,11 +1347,71 @@ mod tests {
     }
 
     #[test]
+    fn a_version_asked_for_before_another_one_is_not_shown() {
+        // Regression: version results were checked by path only, so of two
+        // requests for one secret the last to *arrive* was shown, whichever
+        // version the user had picked last.
+        for late_one_arrives_first in [true, false] {
+            with_screen(|screen, ctx| {
+                screen.update(loaded_with_versions("/b", 3), ctx).unwrap();
+                ask_for_version(screen, ctx, 1, KeyCode::Enter);
+                ask_for_version(screen, ctx, 2, KeyCode::Enter);
+
+                let first = version_loaded("/b", 1, json!({"field_of_v1": "x"}));
+                let second = version_loaded("/b", 2, json!({"field_of_v2": "x"}));
+                let results = if late_one_arrives_first {
+                    [first, second]
+                } else {
+                    [second, first]
+                };
+                for result in results {
+                    screen.update(result, ctx).unwrap();
+                }
+
+                let screen_text = text(screen, ctx, 80, 24);
+                assert!(screen_text.contains("field_of_v2"), "{screen_text}");
+                assert!(!screen_text.contains("field_of_v1"), "{screen_text}");
+            });
+        }
+    }
+
+    #[test]
+    fn a_version_that_failed_is_reported_only_while_it_is_awaited() {
+        let failed = |path: &str, version| Action::VersionLoadFailed {
+            path: path.to_string(),
+            version,
+            message: format!("Could not load version {version} of {path}: permission denied"),
+        };
+
+        with_screen(|screen, ctx| {
+            screen.update(loaded_with_versions("/b", 3), ctx).unwrap();
+            ask_for_version(screen, ctx, 1, KeyCode::Enter);
+            ask_for_version(screen, ctx, 2, KeyCode::Enter);
+
+            // Version 1 is no longer wanted, and /a is not on screen
+            screen.update(failed("/b", 1), ctx).unwrap();
+            screen.update(failed("/a", 2), ctx).unwrap();
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(!screen_text.contains("permission denied"), "{screen_text}");
+
+            screen.update(failed("/b", 2), ctx).unwrap();
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(
+                screen_text.contains("Could not load version 2 of /b"),
+                "{screen_text}"
+            );
+        });
+    }
+
+    #[test]
     fn version_for_edit_opens_only_for_the_secret_on_screen() {
         with_screen(|screen, ctx| {
-            screen
-                .update(loaded("/b", json!({"b": "current"})), ctx)
-                .unwrap();
+            screen.update(loaded_with_versions("/b", 3), ctx).unwrap();
+            let asked = ask_for_version(screen, ctx, 1, KeyCode::Char('n'));
+            assert!(
+                matches!(asked, Some(Action::CreateFromVersion { version: 1, .. })),
+                "{asked:?}"
+            );
 
             let stale = Action::VersionLoadedForEdit {
                 path: "/a".to_string(),
@@ -1236,11 +1439,8 @@ mod tests {
             screen.update(loaded_with_versions("/b", 7), ctx).unwrap();
 
             // Old version on screen, then `e`
-            let old = Action::SecretVersionLoaded {
-                path: "/b".to_string(),
-                version: 3,
-                data: secret(json!({"k": "old"})),
-            };
+            ask_for_version(screen, ctx, 3, KeyCode::Enter);
+            let old = version_loaded("/b", 3, json!({"k": "old"}));
             screen.update(old, ctx).unwrap();
             let screen_text = text(screen, ctx, 100, 24);
             assert!(
@@ -1262,6 +1462,7 @@ mod tests {
             screen.update(loaded_with_versions("/b", 7), ctx).unwrap();
 
             // "Restore as new" from the version list
+            ask_for_version(screen, ctx, 2, KeyCode::Char('n'));
             let for_edit = Action::VersionLoadedForEdit {
                 path: "/b".to_string(),
                 version: 2,
@@ -1711,6 +1912,115 @@ mod tests {
             assert_eq!(screen.focused_pane, FocusedPane::Navigation);
             let lines = rows(screen, ctx, 80, 24);
             assert!(lines[23].contains("Select a secret first"), "{}", lines[23]);
+        });
+    }
+
+    #[test]
+    fn a_failed_save_is_shown_in_the_editor_it_came_from() {
+        with_screen(|screen, ctx| {
+            screen
+                .update(loaded("/a", json!({"api_key": "v"})), ctx)
+                .unwrap();
+            screen.update(Action::EditSecret, ctx).unwrap();
+
+            let failed = Action::SaveFailed {
+                path: "/a".to_string(),
+                message: "Could not save /a: Access denied".to_string(),
+            };
+            screen.update(failed, ctx).unwrap();
+
+            let screen_text = text(screen, ctx, 80, 24);
+            assert!(screen_text.contains("Access denied"), "{screen_text}");
+            assert!(screen_text.contains("api_key"), "{screen_text}");
+            assert!(screen.notices.is_empty());
+        });
+    }
+
+    #[test]
+    fn an_error_about_something_else_never_lands_in_an_open_editor() {
+        // Regression: errors carried no hint of what they were about, so
+        // whatever failed was shown inside the editor that happened to be
+        // open, as if the edit had caused it.
+        let errors = [
+            Action::SaveFailed {
+                path: "/other".to_string(),
+                message: "Could not save /other: Access denied".to_string(),
+            },
+            Action::DeleteFailed {
+                path: "/other".to_string(),
+                message: "Could not delete /other: Access denied".to_string(),
+            },
+            Action::FolderListFailed {
+                request: 1,
+                path: "/other".to_string(),
+                message: "Could not open /other: Access denied".to_string(),
+            },
+        ];
+
+        for error in errors {
+            with_screen(|screen, ctx| {
+                screen
+                    .update(loaded("/a", json!({"api_key": "v"})), ctx)
+                    .unwrap();
+                screen.update(Action::EditSecret, ctx).unwrap();
+                screen.update(error.clone(), ctx).unwrap();
+
+                // Said over the screen, naming what it is about
+                let screen_text = text(screen, ctx, 80, 24);
+                assert!(screen_text.contains(" Error "), "{screen_text}");
+                assert!(
+                    screen_text.contains("/other: Access denied"),
+                    "{screen_text}"
+                );
+
+                // Closed, it leaves the editor as it was, with no error in it
+                screen.handle_key(key(KeyCode::Esc), ctx).unwrap();
+                let screen_text = text(screen, ctx, 80, 24);
+                assert!(!screen_text.contains("Access denied"), "{screen_text}");
+                assert!(screen_text.contains("api_key"), "{screen_text}");
+                assert_eq!(screen.edit_view.as_ref().unwrap().path(), "/a");
+            });
+        }
+    }
+
+    #[test]
+    fn an_error_message_is_all_on_screen_and_takes_every_key() {
+        with_screen(|screen, ctx| {
+            screen.update(loaded("/a", json!({"k": "v"})), ctx).unwrap();
+            let message = "Could not open /team/payments/production/eu-west-1: permission \
+                           denied. The token's policies do not allow listing this folder.";
+            let failed = Action::FolderListFailed {
+                request: 1,
+                path: "/team/payments/production/eu-west-1".to_string(),
+                message: message.to_string(),
+            };
+            screen.update(failed, ctx).unwrap();
+
+            // Every word of it is there at 80x24, in order
+            let screen_text = text(screen, ctx, 80, 24);
+            let shown: Vec<&str> = screen_text
+                .split(|c: char| c.is_whitespace() || c == '│')
+                .filter(|word| !word.is_empty())
+                .collect();
+            let mut from = 0;
+            for word in message.split_whitespace() {
+                let found = shown[from..].iter().position(|shown| *shown == word);
+                from += found.unwrap_or_else(|| panic!("{word:?} is cut\n{screen_text}")) + 1;
+            }
+            assert!(screen_text.contains("Esc close"), "{screen_text}");
+
+            // Nothing else happens until it is closed: `q` does not quit
+            for c in ['q', 'd', 'n', 'p'] {
+                let action = screen.handle_key(key(KeyCode::Char(c)), ctx).unwrap();
+                assert!(action.is_none(), "'{c}' got through as {action:?}");
+            }
+            assert!(!screen.notices.is_empty());
+            assert!(screen.create_input.is_none());
+
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            assert!(screen.notices.is_empty());
+            let action = screen.handle_key(key(KeyCode::Char('q')), ctx).unwrap();
+            assert!(matches!(action, Some(Action::Quit)));
         });
     }
 }

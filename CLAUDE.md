@@ -280,7 +280,8 @@ Environment variables:
 
 ### Error Handling
 - Use `anyhow::Result` for most operations
-- Vault API errors are surfaced as `Action::SetError`
+- A failed request comes back as an action that says what failed (`SecretLoadFailed`, `SaveFailed`, `DeleteFailed`, `FolderListFailed`, `VersionLoadFailed`, `PolicyLoadFailed`, ...), with a message that names the path or policy. There is no catch-all error action
+- An error is shown where its subject is: a failed load in the content pane while that secret is selected, a failed save inside the editor it came from, a policy error on the policy screen. Anything else (a folder that would not open, a failed delete or copy) is a message over the main screen (`MainScreen::notices`). A failed read of something the user has left is dropped
 - Components display errors in UI, don't panic
 
 ### Focus Management
@@ -351,7 +352,7 @@ self.async_manager.spawn(async move {
             tx.send(Action::SecretLoaded { path, data, metadata }).unwrap();
         }
         Err(e) => {
-            tx.send(Action::SetError { message: e.to_string() }).unwrap();
+            tx.send(Action::SecretLoadFailed { path, message: e.to_string() }).unwrap();
         }
     }
 });
@@ -424,6 +425,6 @@ Clipboard manager automatically clears copied secrets after 30 seconds:
 - **Build request URLs with `sanitize::vault_url()`**, never `format!`. It percent-encodes each path segment, so a name containing `%2e%2e`, `?` or `#` cannot change which endpoint is called
 - **Check the HTTP status of every response** (`ensure_success` in `kv.rs`). A write that Vault rejects must reach the UI as an error
 - **Keep secret values as `vault::SecretData`** (`HashMap<String, serde_json::Value>`), not strings. Converting to `String` anywhere on the load path deletes non-string fields on the next save. Use `app::secret::display_value()` to show a value and `edited_value()` to turn edited text back into a value
-- **Async completions must say what they are for** (path, version) and be ignored when the user has moved on; see the `SecretLoaded` guard in `Root::process_action`
+- **Async completions must say what they are for** (path, version, policy name, request number), failures included, and be ignored when the user has moved on. See the `SecretLoaded` guard and `take_listing` in `Root`, `DetailViewComponent::version_arrived`, and `PolicyScreen::awaited`
 - **Pasted text is data**: it arrives as `Event::Paste` and goes through `Component::handle_paste`, which only text inputs act on. Never feed it to `handle_key`
 - Use TLS verification by default (`--insecure` flag for dev only, warns user)

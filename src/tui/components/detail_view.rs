@@ -91,6 +91,9 @@ pub struct DetailViewComponent {
     /// The current (latest) version number in Vault
     current_version: Option<u64>,
 
+    /// Version that was asked for, to view or to edit, and has not arrived
+    awaited_version: Option<u64>,
+
     /// Value being shown in full, if any
     viewer: Option<ValueViewer>,
 
@@ -118,6 +121,7 @@ impl DetailViewComponent {
             selected_version_index: 0,
             viewing_version: None,
             current_version: None,
+            awaited_version: None,
             viewer: None,
             data_state: ListState::default(),
             versions_state: ListState::default(),
@@ -226,6 +230,17 @@ impl DetailViewComponent {
         self.versions
             .get(self.selected_version_index)
             .map(|v| v.version)
+    }
+
+    /// A version that was asked for has arrived, or could not be loaded.
+    ///
+    /// Returns whether it is still the one awaited, and stops waiting for
+    /// it. A version asked for before the user picked another one is not:
+    /// requests are not cancelled, so their results can arrive in any order.
+    pub fn version_arrived(&mut self, version: u64) -> bool {
+        self.awaited_version
+            .take_if(|awaited| *awaited == version)
+            .is_some()
     }
 
     /// Load data for a specific version
@@ -754,20 +769,22 @@ impl Component for DetailViewComponent {
             DetailMode::Versions => match (key.code, key.modifiers) {
                 // View selected version
                 (KeyCode::Enter, KeyModifiers::NONE) => {
-                    self.selected_version()
-                        .map(|version| Action::ViewSecretVersion {
-                            path: self.path.clone(),
-                            version,
-                        })
+                    let version = self.selected_version();
+                    self.awaited_version = version;
+                    version.map(|version| Action::ViewSecretVersion {
+                        path: self.path.clone(),
+                        version,
+                    })
                 }
 
                 // Create new version from selected
                 (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                    self.selected_version()
-                        .map(|version| Action::CreateFromVersion {
-                            path: self.path.clone(),
-                            version,
-                        })
+                    let version = self.selected_version();
+                    self.awaited_version = version;
+                    version.map(|version| Action::CreateFromVersion {
+                        path: self.path.clone(),
+                        version,
+                    })
                 }
 
                 // Back to the fields

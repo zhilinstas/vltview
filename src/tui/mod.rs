@@ -133,8 +133,8 @@ impl Tui {
                         }
                         Err(e) => {
                             self.root.process_action(
-                                action::Action::SetError {
-                                    message: format!("Failed to copy: {}", e),
+                                action::Action::CopyFailed {
+                                    message: format!("Could not copy to the clipboard: {}", e),
                                 },
                                 &mut self.app,
                             )?;
@@ -142,8 +142,8 @@ impl Tui {
                     }
                 } else {
                     self.root.process_action(
-                        action::Action::SetError {
-                            message: "Clipboard not available".to_string(),
+                        action::Action::CopyFailed {
+                            message: "Nothing was copied: no clipboard is available".to_string(),
                         },
                         &mut self.app,
                     )?;

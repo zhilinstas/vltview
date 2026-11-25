@@ -287,11 +287,15 @@ impl Root {
                 return Ok(());
             }
 
-            // Load a secret now, whatever the cursor is doing
-            Action::ViewSecret { path } => {
-                self.pending_preview = None;
-                self.latest_secret_request = Some(path.clone());
-                self.spawn_load_secret(app, path.clone());
+            // A secret was written. It is read again only if the cursor is
+            // still on it: the content pane shows what is selected, not what
+            // was saved last. (A new secret gets the cursor when the list
+            // reloads, and is loaded as the selection then.)
+            Action::ReloadSecret { path } => {
+                if self.latest_secret_request.as_deref() == Some(path.as_str()) {
+                    self.pending_preview = None;
+                    self.spawn_load_secret(app, path.clone());
+                }
                 return Ok(());
             }
 
@@ -391,21 +395,23 @@ impl Root {
                 return self.process_action(Action::StateUpdated, app);
             }
 
-            Action::FolderListFailed {
-                request, message, ..
-            } => {
-                if self.take_listing(*request).is_none() {
+            Action::FolderListFailed { request, .. } => {
+                if self
+                    .listing
+                    .take_if(|listing| listing.id == *request)
+                    .is_none()
+                {
                     tracing::debug!("Ignoring stale folder listing failure");
                     return Ok(());
                 }
-                let message = message.clone();
+                self.main_screen.update(action, &mut ctx)?;
 
                 // The user stays where they were, so the reload that was put
                 // off for this navigation is due after all
                 if std::mem::take(&mut self.reload_skipped) {
                     self.request_listing(app, app.state().current_path(), ListingKind::Reload);
                 }
-                return self.process_action(Action::SetError { message }, app);
+                return Ok(());
             }
 
             Action::CopyToClipboard { text } => {
@@ -474,8 +480,8 @@ impl Root {
                 self.main_screen.update(action, &mut ctx)?;
             }
 
-            // Errors belong to the screen the user is looking at
-            Action::SetError { .. } if self.active_screen == ActiveScreen::Policy => {
+            // A failed copy is reported where the key was pressed
+            Action::CopyFailed { .. } if self.active_screen == ActiveScreen::Policy => {
                 self.policy_screen.update(action, &mut ctx)?;
             }
 
@@ -491,7 +497,10 @@ impl Root {
             | Action::HideConfirmation
             | Action::SetStatus { .. }
             | Action::ClearStatus
-            | Action::SetError { .. }
+            | Action::SaveFailed { .. }
+            | Action::DeleteFailed { .. }
+            | Action::VersionLoadFailed { .. }
+            | Action::CopyFailed { .. }
             | Action::ClearError
             | Action::SetLoading { .. }
             | Action::StateUpdated
@@ -513,8 +522,12 @@ impl Root {
                 }
             }
 
-            // Policy screen actions
-            Action::PoliciesLoaded { .. } | Action::PolicyLoaded { .. } => {
+            // Policy screen actions. Its errors go there too, whatever is
+            // on screen when they arrive.
+            Action::PoliciesLoaded { .. }
+            | Action::PolicyLoaded { .. }
+            | Action::PoliciesLoadFailed { .. }
+            | Action::PolicyLoadFailed { .. } => {
                 self.policy_screen.update(action, &mut ctx)?;
             }
 
@@ -595,8 +608,8 @@ impl Root {
                 })
             },
             move |e| Action::SecretLoadFailed {
+                message: format!("Could not load {failed_path}: {e}"),
                 path: failed_path.clone(),
-                message: format!("Failed to load secret: {}", e),
             },
         );
     }
@@ -667,6 +680,7 @@ impl Root {
     /// Spawn async operation to delete a secret
     fn spawn_delete_secret(&mut self, app: &App, path: String) {
         let secret_service = app.secret_service().clone();
+        let failed_path = path.clone();
 
         self.async_manager.spawn(
             async move {
@@ -682,8 +696,9 @@ impl Root {
                     ],
                 })
             },
-            |e| Action::SetError {
-                message: format!("Delete failed: {}", e),
+            move |e| Action::DeleteFailed {
+                message: format!("Could not delete {failed_path}: {e}"),
+                path: failed_path.clone(),
             },
         );
     }
@@ -697,8 +712,8 @@ impl Root {
                 let policies = policy_service.list().await?;
                 Ok(Action::PoliciesLoaded { policies })
             },
-            |e| Action::SetError {
-                message: format!("Failed to load policies: {}", e),
+            |e| Action::PoliciesLoadFailed {
+                message: format!("Could not load the policy list: {e}"),
             },
         );
     }
@@ -716,8 +731,9 @@ impl Root {
                     content,
                 })
             },
-            move |e| Action::SetError {
-                message: format!("Failed to load policy '{}': {}", name_for_error, e),
+            move |e| Action::PolicyLoadFailed {
+                message: format!("Could not load policy '{name_for_error}': {e}"),
+                name: name_for_error.clone(),
             },
         );
     }
@@ -725,6 +741,7 @@ impl Root {
     /// Spawn async operation to save a secret
     fn spawn_save_secret(&mut self, app: &App, path: String, data: crate::vault::SecretData) {
         let secret_service = app.secret_service().clone();
+        let failed_path = path.clone();
 
         self.async_manager.spawn(
             async move {
@@ -738,13 +755,14 @@ impl Root {
                             message: format!("Saved: {}", path),
                         },
                         Action::Refresh, // Refresh navigation list to show new secret
-                        // Reload secret to show new version in history
-                        Action::ViewSecret { path: path.clone() },
+                        // Show the new version, if the secret is still selected
+                        Action::ReloadSecret { path: path.clone() },
                     ],
                 })
             },
-            |e| Action::SetError {
-                message: format!("Failed to save secret: {}", e),
+            move |e| Action::SaveFailed {
+                message: format!("Could not save {failed_path}: {e}"),
+                path: failed_path.clone(),
             },
         );
     }
@@ -752,6 +770,7 @@ impl Root {
     /// Spawn async operation to load a specific version of a secret
     fn spawn_load_secret_version(&mut self, app: &App, path: String, version: u64) {
         let secret_service = app.secret_service().clone();
+        let failed_path = path.clone();
 
         self.async_manager.spawn(
             async move {
@@ -764,8 +783,10 @@ impl Root {
                     data,
                 })
             },
-            |e| Action::SetError {
-                message: format!("Failed to load secret version: {}", e),
+            move |e| Action::VersionLoadFailed {
+                message: format!("Could not load version {version} of {failed_path}: {e}"),
+                path: failed_path.clone(),
+                version,
             },
         );
     }
@@ -773,6 +794,7 @@ impl Root {
     /// Spawn async operation to load a version for editing (create from old)
     fn spawn_load_version_for_edit(&mut self, app: &App, path: String, version: u64) {
         let secret_service = app.secret_service().clone();
+        let failed_path = path.clone();
 
         self.async_manager.spawn(
             async move {
@@ -785,8 +807,10 @@ impl Root {
                     data,
                 })
             },
-            |e| Action::SetError {
-                message: format!("Failed to load version for editing: {}", e),
+            move |e| Action::VersionLoadFailed {
+                message: format!("Could not load version {version} of {failed_path}: {e}"),
+                path: failed_path.clone(),
+                version,
             },
         );
     }
@@ -875,9 +899,11 @@ mod tests {
         }
     }
 
+    /// The cursor comes to rest on the secret at `path`
     fn view(path: &str) -> Action {
-        Action::ViewSecret {
-            path: path.to_string(),
+        Action::SelectionChanged {
+            secret: Some(path.to_string()),
+            source: SelectionSource::Cursor,
         }
     }
 
@@ -1043,10 +1069,14 @@ mod tests {
         let mut root = test_root(&app);
         let start = Instant::now();
 
-        // Saved and reloaded explicitly; then the list reload puts the
-        // cursor on it
+        // The cursor is on /a; it is saved and read again. The list reload
+        // that follows finds the cursor on the same secret.
         root.process_action(view("/a"), &mut app).unwrap();
-        assert_eq!(spawned(&root), 1);
+        let reload = Action::ReloadSecret {
+            path: "/a".to_string(),
+        };
+        root.process_action(reload, &mut app).unwrap();
+        assert_eq!(spawned(&root), 2);
         root.selection_changed(
             &app,
             Some("/a".to_string()),
@@ -1054,7 +1084,7 @@ mod tests {
             start,
         );
         root.tick_at(&mut app, start + PREVIEW_DEBOUNCE).unwrap();
-        assert_eq!(spawned(&root), 1);
+        assert_eq!(spawned(&root), 2);
     }
 
     #[tokio::test]
@@ -1146,8 +1176,8 @@ mod tests {
         root.process_action(Action::LoadPolicies, &mut app).unwrap();
         assert!(screen_text(&mut root, &app).contains("Loading policies"));
 
-        let error = Action::SetError {
-            message: "Failed to load policies: permission denied".to_string(),
+        let error = Action::PoliciesLoadFailed {
+            message: "Could not load the policy list: permission denied".to_string(),
         };
         root.process_action(error, &mut app).unwrap();
 
@@ -1397,7 +1427,119 @@ mod tests {
         assert!(text.contains("permission denied"), "{text}");
 
         // The step was not taken, so it can be tried again
+        let esc = KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        root.handle_key_event(esc, &app).unwrap();
         press(&mut root, &mut app, 'b');
         answer(&mut root, &mut app, "/a");
+    }
+
+    /// What a completed save sends
+    fn saved(path: &str) -> Action {
+        Action::Batch {
+            actions: vec![
+                Action::SecretSaved {
+                    path: path.to_string(),
+                },
+                Action::Refresh,
+                Action::ReloadSecret {
+                    path: path.to_string(),
+                },
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn a_saved_secret_is_read_again_while_the_cursor_is_on_it() {
+        let mut app = test_app_at("/", &["a", "b"]);
+        let mut root = test_root(&app);
+        root.process_action(view("/a"), &mut app).unwrap();
+        root.process_action(loaded("/a", "field_a"), &mut app)
+            .unwrap();
+        let before = spawned(&root);
+
+        root.process_action(saved("/a"), &mut app).unwrap();
+
+        // The list and the secret
+        assert_eq!(spawned(&root), before + 2);
+        assert_eq!(root.latest_secret_request.as_deref(), Some("/a"));
+    }
+
+    #[tokio::test]
+    async fn a_saved_secret_does_not_take_the_pane_after_the_cursor_left_it() {
+        // Regression: a save always loaded and showed the saved secret, so
+        // the pane could show /a while the cursor was on /b.
+        let mut app = test_app_at("/", &["a", "b"]);
+        let mut root = test_root(&app);
+        root.process_action(view("/a"), &mut app).unwrap();
+        root.process_action(loaded("/a", "field_a"), &mut app)
+            .unwrap();
+
+        // The cursor moves on while the save is on its way
+        root.process_action(view("/b"), &mut app).unwrap();
+        root.process_action(loaded("/b", "field_b"), &mut app)
+            .unwrap();
+        let before = spawned(&root);
+
+        root.process_action(saved("/a"), &mut app).unwrap();
+
+        // Only the list is read again; /a is not, and the pane stays on /b
+        assert_eq!(spawned(&root), before + 1);
+        assert_eq!(root.latest_secret_request.as_deref(), Some("/b"));
+        let listing = listed(listing(&root), "/", &["a", "b"]);
+        root.process_action(listing, &mut app).unwrap();
+        root.process_action(loaded("/a", "field_a"), &mut app)
+            .unwrap();
+
+        let text = screen_text(&mut root, &app);
+        assert!(text.contains("field_b"), "{text}");
+        assert!(!text.contains("field_a"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn main_screen_errors_do_not_appear_on_other_screens() {
+        // Regression: an error went to whichever screen was open when it
+        // arrived, so a failed delete could replace the policy list.
+        let mut app = test_app();
+        let mut root = test_root(&app);
+        root.process_action(Action::ShowPolicyScreen, &mut app)
+            .unwrap();
+        let policies = Action::PoliciesLoaded {
+            policies: vec!["admin".to_string()],
+        };
+        root.process_action(policies, &mut app).unwrap();
+
+        let failed = Action::DeleteFailed {
+            path: "/a".to_string(),
+            message: "Could not delete /a: permission denied".to_string(),
+        };
+        root.process_action(failed, &mut app).unwrap();
+
+        let text = screen_text(&mut root, &app);
+        assert!(text.contains("admin"), "{text}");
+        assert!(!text.contains("permission denied"), "{text}");
+
+        // It is waiting where it belongs
+        root.process_action(Action::ScreenBack, &mut app).unwrap();
+        let text = screen_text(&mut root, &app);
+        assert!(text.contains("Could not delete /a"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn policy_errors_do_not_appear_on_the_main_screen() {
+        let mut app = test_app();
+        let mut root = test_root(&app);
+
+        let failed = Action::PoliciesLoadFailed {
+            message: "Could not load the policy list: permission denied".to_string(),
+        };
+        root.process_action(failed, &mut app).unwrap();
+        assert!(!screen_text(&mut root, &app).contains("permission denied"));
+
+        root.process_action(Action::ShowPolicyScreen, &mut app)
+            .unwrap();
+        assert!(screen_text(&mut root, &app).contains("permission denied"));
     }
 }

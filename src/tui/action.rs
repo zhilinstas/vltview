@@ -138,8 +138,9 @@ pub enum Action {
     // ═══════════════════════════════════════════════════════════════
     // SECRET ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Load a secret now and show it (triggers async operation)
-    ViewSecret { path: String },
+    /// A secret was written: read it again, if the cursor is still on it.
+    /// If the cursor has left, the content pane keeps following the cursor.
+    ReloadSecret { path: String },
 
     /// Go into the secret under the cursor: focus the content pane, loading
     /// the secret first if it is not on screen yet
@@ -167,11 +168,17 @@ pub enum Action {
     /// Secret saved successfully
     SecretSaved { path: String },
 
+    /// A secret could not be saved (async completion)
+    SaveFailed { path: String, message: String },
+
     /// Delete a secret
     DeleteSecret { path: String },
 
     /// Secret deleted successfully
     SecretDeleted { path: String },
+
+    /// A secret could not be deleted (async completion)
+    DeleteFailed { path: String, message: String },
 
     /// View specific version of secret
     ViewSecretVersion { path: String, version: u64 },
@@ -193,6 +200,14 @@ pub enum Action {
     /// Create new version from historical version
     CreateFromVersion { path: String, version: u64 },
 
+    /// A version of a secret could not be loaded, for viewing or for
+    /// editing (async completion)
+    VersionLoadFailed {
+        path: String,
+        version: u64,
+        message: String,
+    },
+
     // ═══════════════════════════════════════════════════════════════
     // EDIT VIEW ACTIONS
     // ═══════════════════════════════════════════════════════════════
@@ -213,6 +228,12 @@ pub enum Action {
 
     /// Policy content loaded
     PolicyLoaded { name: String, content: String },
+
+    /// The policy list could not be loaded (async completion)
+    PoliciesLoadFailed { message: String },
+
+    /// A policy could not be loaded (async completion)
+    PolicyLoadFailed { name: String, message: String },
 
     /// Scroll policy content
     ScrollPolicy { direction: ScrollDirection },
@@ -238,6 +259,9 @@ pub enum Action {
     /// Copy operation completed
     CopyComplete { success: bool, message: String },
 
+    /// Nothing was copied to the clipboard
+    CopyFailed { message: String },
+
     // ═══════════════════════════════════════════════════════════════
     // STATUS/ERROR ACTIONS
     // ═══════════════════════════════════════════════════════════════
@@ -246,9 +270,6 @@ pub enum Action {
 
     /// Clear status message
     ClearStatus,
-
-    /// Set error message
-    SetError { message: String },
 
     /// Clear error message
     ClearError,

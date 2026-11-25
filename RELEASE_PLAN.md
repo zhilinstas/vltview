@@ -90,8 +90,8 @@ Behaviour changes to put in the changelog:
 - [x] Bracketed paste is off: pasted text runs as commands (`d` then `y`
       confirms a permanent delete). Fixed with step 4: a paste goes into the
       text input that has focus and is dropped anywhere else
-- [ ] History back/forward ping-pongs between two paths; forward never works
-- [ ] Refresh/navigate race can leave one directory's items under another path
+- [x] History back/forward ping-pongs between two paths; forward never works
+- [x] Refresh/navigate race can leave one directory's items under another path
 - [ ] Edit view accepts empty and duplicate keys (Ctrl+S on a new secret
       with an unnamed field still sends `{"": ""}`). Newlines in keys were
       fixed with step 4
@@ -135,13 +135,13 @@ Fixed in the pull request (fourth commit), each with a test:
 
 Open:
 
-- [ ] A late policy result is applied whatever the user has moved to, and
+- [x] A late policy result is applied whatever the user has moved to, and
       opens the policy even after Esc
-- [ ] Version results are checked by path but not by version number, so two
+- [x] Version results are checked by path but not by version number, so two
       requests for one secret resolve to whichever arrives last (from code)
-- [ ] Errors do not say what they are for: an error lands on whichever screen
+- [x] Errors do not say what they are for: an error lands on whichever screen
       or editor is open when it arrives
-- [ ] After a save the saved secret is loaded and shown even if the cursor
+- [x] After a save the saved secret is loaded and shown even if the cursor
       has left it
 - [ ] Creating `a/b` when `a/b` exists still writes a new version: the name
       check only looks at the folder on screen (from code). A create should

@@ -110,6 +110,39 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Break a message into lines of at most `width` columns, at spaces.
+///
+/// For text that is read as sentences (errors, warnings): no word is split
+/// unless it is longer than a whole line, and nothing is left out.
+pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+
+    for source in text.split('\n') {
+        let mut current = String::new();
+        for word in source.split_whitespace() {
+            let needed = display_width(&current) + usize::from(!current.is_empty());
+            if !current.is_empty() && needed + display_width(word) > width {
+                lines.push(std::mem::take(&mut current));
+            }
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            // A word longer than a line (a path, a URL) is cut at the edge
+            let mut pieces = wrap(word, width);
+            let last = pieces.pop().unwrap_or_default();
+            if !pieces.is_empty() && !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            lines.extend(pieces);
+            current.push_str(&last);
+        }
+        lines.push(current);
+    }
+
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +171,31 @@ mod tests {
         assert_eq!(wrap("abcdefgh", 3), vec!["abc", "def", "gh"]);
         assert_eq!(wrap("", 5), vec![""]);
         assert_eq!(wrap("a\n\nb", 5), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn messages_wrap_at_spaces_and_lose_nothing() {
+        let text = "Could not open /team/payments: permission denied by the policy";
+        let lines = wrap_words(text, 24);
+        assert_eq!(
+            lines,
+            [
+                "Could not open",
+                "/team/payments:",
+                "permission denied by the",
+                "policy"
+            ]
+        );
+        assert!(lines.iter().all(|line| display_width(line) <= 24));
+        assert_eq!(lines.join(" "), text);
+    }
+
+    #[test]
+    fn a_word_longer_than_a_line_is_cut_at_the_edge() {
+        let lines = wrap_words("see /a/very/long/path/to/a/secret now", 10);
+        assert_eq!(
+            lines,
+            ["see", "/a/very/lo", "ng/path/to", "/a/secret", "now"]
+        );
     }
 }

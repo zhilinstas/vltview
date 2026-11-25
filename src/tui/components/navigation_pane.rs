@@ -425,10 +425,20 @@ impl Component for NavigationPane {
                 Ok(self.announce(SelectionSource::ListChange))
             }
 
-            // Put the cursor on a secret that was just written, once the
-            // reload that follows the save brings it into the list
+            // Put the cursor on a secret that was just created, once the
+            // reload that follows the save brings it into the list. A secret
+            // that is already listed was edited: the cursor stays where the
+            // user has it.
             Action::SecretSaved { path } => {
-                self.select_after_reload = Some(path);
+                let listed = ctx
+                    .app
+                    .state()
+                    .list_items()
+                    .iter()
+                    .any(|item| child_path(&self.loaded_path, item) == path);
+                if !listed {
+                    self.select_after_reload = Some(path);
+                }
                 Ok(None)
             }
 
@@ -764,6 +774,26 @@ mod tests {
             let action = pane.update(Action::StateUpdated, ctx).unwrap();
             assert_eq!(pane.selected_item(), Some("m"));
             assert_eq!(selection(action), Some(Some("/app/m".to_string())));
+        });
+    }
+
+    #[test]
+    fn saving_an_existing_secret_does_not_move_the_cursor() {
+        // Regression: every save pulled the cursor back to the saved secret
+        // on the next reload, even after the user had moved on.
+        let app = test_app("/app", &["a", "m", "z"]);
+        with_pane(&app, |pane, ctx, _| {
+            pane.handle_key(key(KeyCode::End), ctx).unwrap();
+            assert_eq!(pane.selected_item(), Some("z"));
+
+            let saved = Action::SecretSaved {
+                path: "/app/m".to_string(),
+            };
+            pane.update(saved, ctx).unwrap();
+            let action = pane.update(Action::StateUpdated, ctx).unwrap();
+
+            assert_eq!(pane.selected_item(), Some("z"));
+            assert!(action.is_none(), "{action:?}");
         });
     }
 

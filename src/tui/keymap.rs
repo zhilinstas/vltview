@@ -37,6 +37,8 @@ pub enum Context {
     CreatePrompt,
     /// Question before deleting a secret
     DeleteConfirm,
+    /// An error message over the main screen
+    Notice,
     /// Policy list
     Policies,
     /// Content of one policy
@@ -47,7 +49,7 @@ pub enum Context {
 
 impl Context {
     /// Every context, in the order the help overlay lists them
-    pub const ALL: [Context; 15] = [
+    pub const ALL: [Context; 16] = [
         Context::Global,
         Context::Navigation,
         Context::Filter,
@@ -60,6 +62,7 @@ impl Context {
         Context::FieldDeleteConfirm,
         Context::CreatePrompt,
         Context::DeleteConfirm,
+        Context::Notice,
         Context::Policies,
         Context::PolicyContent,
         Context::Logs,
@@ -80,6 +83,7 @@ impl Context {
             Context::FieldDeleteConfirm => "Deleting a field",
             Context::CreatePrompt => "New secret name",
             Context::DeleteConfirm => "Deleting a secret",
+            Context::Notice => "An error message",
             Context::Policies => "Policy list",
             Context::PolicyContent => "Policy content",
             Context::Logs => "Logs",
@@ -244,6 +248,8 @@ const DELETE_CONFIRM: &[Binding] = &[
     bind("n/Esc", "cancel", "Keep the secret", 1),
 ];
 
+const NOTICE: &[Binding] = &[bind("Esc", "close", "Close the message (also Enter)", 1)];
+
 const POLICIES: &[Binding] = &[
     bind("j/k ↑/↓", "move", "Move between policies", 1),
     bind("PgUp/PgDn g/G", "page", "Page up / down, first / last", 0),
@@ -291,6 +297,7 @@ pub fn bindings(context: Context) -> &'static [Binding] {
         Context::FieldDeleteConfirm => FIELD_DELETE_CONFIRM,
         Context::CreatePrompt => CREATE_PROMPT,
         Context::DeleteConfirm => DELETE_CONFIRM,
+        Context::Notice => NOTICE,
         Context::Policies => POLICIES,
         Context::PolicyContent => POLICY_CONTENT,
         Context::Logs => LOGS,
