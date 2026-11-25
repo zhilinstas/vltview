@@ -9,11 +9,11 @@ use ratatui::{
 };
 use ratatui_textarea::{Input, TextArea};
 
-use crate::app::secret::{display_value, edited_value, json_type_name};
+use crate::app::secret::{display_value, edited_value, json_type_name, masked};
 use crate::tui::action::Action;
 use crate::tui::component::Component;
 use crate::tui::components::popup::{
-    border_color, centered, display_width, selection_style, truncate, wrap, wrap_words,
+    border_color, centered, display_width, selection_style, truncate, visibility, wrap, wrap_words,
 };
 use crate::tui::context::{ComponentContext, RenderContext};
 use crate::vault::{SecretData, WriteMode};
@@ -44,6 +44,8 @@ struct Field {
     /// row, not to the key: renaming a field keeps its type, and two rows
     /// that share a key for a moment cannot take each other's.
     original: Option<serde_json::Value>,
+    /// Whether the value is shown in the list although the rest is masked
+    revealed: bool,
 }
 
 impl Field {
@@ -52,6 +54,7 @@ impl Field {
             key: key.into(),
             text: text.into(),
             original: None,
+            revealed: false,
         }
     }
 }
@@ -90,6 +93,10 @@ pub struct EditViewComponent {
     /// Whether there are unsaved changes
     has_changes: bool,
 
+    /// Whether every value is shown in the list. Values are masked there as
+    /// in the secret view; the one being typed is in clear in its text box.
+    show_values: bool,
+
     /// Error message, shown under the fields until the next key
     error: Option<String>,
 
@@ -126,6 +133,7 @@ impl EditViewComponent {
             value_textarea: styled_textarea(Vec::new()),
             is_new: false,
             has_changes: false,
+            show_values: false,
             error: None,
             delete_confirmation: None,
             restore_note: None,
@@ -142,6 +150,7 @@ impl EditViewComponent {
                 key,
                 text: display_value(&value),
                 original: (!value.is_string()).then_some(value),
+                revealed: false,
             })
             .collect();
         fields.sort_by(|a, b| a.key.cmp(&b.key));
@@ -393,6 +402,24 @@ impl EditViewComponent {
         }
     }
 
+    /// Show or hide every value in the list
+    fn toggle_values(&mut self) {
+        self.show_values = !self.show_values;
+        if !self.show_values {
+            // Hiding everything hides the peeked values too
+            for field in &mut self.fields {
+                field.revealed = false;
+            }
+        }
+    }
+
+    /// Show or hide the selected value only
+    fn toggle_peek(&mut self) {
+        if let Some(field) = self.fields.get_mut(self.selected_index) {
+            field.revealed = !field.revealed;
+        }
+    }
+
     /// Cancel field deletion
     fn cancel_delete_field(&mut self) {
         self.delete_confirmation = None;
@@ -445,6 +472,7 @@ impl EditViewComponent {
             .min((area.width as usize / 2).max(8))
             .max(5);
 
+        let show_values = self.show_values;
         let items: Vec<ListItem> = self
             .fields
             .iter()
@@ -465,6 +493,8 @@ impl EditViewComponent {
                 // Show value preview (first line only)
                 let (value_text, value_style) = if value.is_empty() {
                     ("<value>".to_string(), Style::default().fg(Color::DarkGray))
+                } else if !(show_values || field.revealed) {
+                    (masked(value).to_string(), Style::default().fg(Color::White))
                 } else {
                     let mut lines = value.split('\n');
                     let first = lines.next().unwrap_or_default();
@@ -635,6 +665,17 @@ impl Component for EditViewComponent {
                         None
                     }
 
+                    // Reveal the selected value / every value, as in the
+                    // secret view
+                    (KeyCode::Char(' '), KeyModifiers::NONE) => {
+                        self.toggle_peek();
+                        None
+                    }
+                    (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                        self.toggle_values();
+                        None
+                    }
+
                     // Save secret. A value whose type would change is
                     // refused rather than sent.
                     (KeyCode::Char('s'), KeyModifiers::CONTROL) => self.save(),
@@ -744,16 +785,22 @@ impl Component for EditViewComponent {
         }
 
         let count = if self.fields.len() == 1 {
-            " 1 field ".to_string()
+            " 1 field · ".to_string()
         } else {
-            format!(" {} fields ", self.fields.len())
+            format!(" {} fields · ", self.fields.len())
         };
+        let revealed = self.fields.iter().filter(|field| field.revealed).count();
+        let state = Line::from(vec![
+            Span::styled(count, Style::default().fg(Color::Gray)),
+            visibility(self.show_values, revealed),
+            Span::raw(" "),
+        ]);
 
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color(focused)))
             .title(Line::from(title))
-            .title_bottom(Span::styled(count, Style::default().fg(Color::Gray)));
+            .title_bottom(state);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1382,7 +1429,7 @@ mod tests {
                 "Row 2 has a value but no key. Give it a key, or delete the row.",
             );
             // Everything typed is still there
-            assert!(screen.contains("orphan"), "{screen}");
+            assert_eq!(view.fields[1].text, "orphan");
             assert!(screen.contains("host"), "{screen}");
 
             // The message goes away on the next key
@@ -1469,6 +1516,77 @@ mod tests {
                 }
                 other => panic!("expected a save, got {other:?}"),
             }
+        });
+    }
+
+    /// What is to the right of the key column, for the field named `name`
+    fn value_cell<'a>(screen: &'a str, name: &str) -> &'a str {
+        let row = screen
+            .lines()
+            .find(|line| line.contains(&format!(" {name} ")))
+            .unwrap_or_else(|| panic!("no row for {name}\n{screen}"));
+        let (_, value) = row.split_once(" │ ").expect("a key and a value");
+        value.trim_end_matches('│').trim_end()
+    }
+
+    #[test]
+    fn the_editor_masks_values_like_the_secret_view() {
+        // Regression: the editor showed every value in clear as soon as it
+        // was opened.
+        with_ctx(|ctx| {
+            let mut view = editor(json!({
+                "a_short": "x",
+                "b_long": "correct-horse-battery-staple-0123456789",
+                "c_lines": "first line\nsecond line",
+                "d_unicode": "пароль✓🔑",
+            }));
+
+            let screen = rendered(&mut view, 70, 14);
+            for name in ["a_short", "b_long", "c_lines", "d_unicode"] {
+                assert_eq!(value_cell(&screen, name), "••••••••", "{name}\n{screen}");
+            }
+            for leaked in ["correct", "789", "first", "+1 lines", "пароль", "🔑"] {
+                assert!(
+                    !screen.contains(leaked),
+                    "{leaked:?} is on screen\n{screen}"
+                );
+            }
+            assert!(screen.contains("values masked"), "{screen}");
+
+            // Space shows the selected value only
+            view.handle_key(key(KeyCode::Char(' ')), ctx).unwrap();
+            let screen = rendered(&mut view, 70, 14);
+            assert_eq!(value_cell(&screen, "a_short"), "x", "{screen}");
+            assert_eq!(value_cell(&screen, "b_long"), "••••••••", "{screen}");
+            assert!(screen.contains("1 revealed"), "{screen}");
+
+            // `v` shows them all, and hides them all again
+            view.handle_key(key(KeyCode::Char('v')), ctx).unwrap();
+            let screen = rendered(&mut view, 70, 14);
+            assert!(screen.contains("correct-horse-battery-staple"), "{screen}");
+            assert!(screen.contains("values VISIBLE"), "{screen}");
+            view.handle_key(key(KeyCode::Char('v')), ctx).unwrap();
+            let screen = rendered(&mut view, 70, 14);
+            assert_eq!(value_cell(&screen, "a_short"), "••••••••", "{screen}");
+            assert!(screen.contains("values masked"), "{screen}");
+        });
+    }
+
+    #[test]
+    fn a_value_is_in_clear_only_while_it_is_being_typed() {
+        with_ctx(|ctx| {
+            let mut view = editor(json!({"token": "s3cret-value", "user": "admin"}));
+
+            view.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            let screen = rendered(&mut view, 70, 14);
+            assert!(screen.contains("s3cret-value"), "{screen}");
+            assert!(!screen.contains("admin"), "{screen}");
+
+            type_text(&mut view, ctx, "-2");
+            view.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            let screen = rendered(&mut view, 70, 14);
+            assert!(!screen.contains("s3cret-value"), "{screen}");
+            assert_eq!(value_cell(&screen, "token"), "••••••••", "{screen}");
         });
     }
 }

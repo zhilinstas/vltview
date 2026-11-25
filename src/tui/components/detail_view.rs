@@ -9,10 +9,12 @@ use ratatui::{
 };
 use std::collections::HashSet;
 
-use crate::app::secret::display_value;
+use crate::app::secret::{display_value, masked};
 use crate::tui::action::{Action, FocusedPane};
 use crate::tui::component::Component;
-use crate::tui::components::popup::{border_color, display_width, selection_style, truncate, wrap};
+use crate::tui::components::popup::{
+    border_color, display_width, selection_style, truncate, visibility, wrap,
+};
 use crate::tui::context::{ComponentContext, RenderContext};
 use crate::tui::keymap::Context;
 use crate::vault::SecretData;
@@ -370,26 +372,6 @@ impl DetailViewComponent {
         keys
     }
 
-    /// Mask a value for display
-    fn mask_value(&self, value: &str) -> String {
-        if value.is_empty() {
-            return "(empty)".to_string();
-        }
-
-        // Work in characters, not bytes: slicing a multi-byte character
-        // (any non-ASCII secret) by byte offset panics.
-        let mut chars = value.chars();
-        let count = chars.clone().count();
-
-        // Fully mask short values, show first and last character otherwise
-        match (chars.next(), chars.next_back()) {
-            (Some(first), Some(last)) if count > 4 => {
-                format!("{}{}{}", first, "•".repeat(count - 2), last)
-            }
-            _ => "•".repeat(count),
-        }
-    }
-
     // ═══════════════════════════════════════════════════════════════
     // RENDERING
     // ═══════════════════════════════════════════════════════════════
@@ -470,22 +452,9 @@ impl DetailViewComponent {
                 } else {
                     format!("{} fields", self.secret.len())
                 };
-                let visibility = if self.show_values {
-                    Span::styled(
-                        "values VISIBLE",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    )
-                } else if self.revealed.is_empty() {
-                    Span::styled("values masked", Style::default().fg(Color::Green))
-                } else {
-                    Span::styled(
-                        format!("{} revealed", self.revealed.len()),
-                        Style::default().fg(Color::Red),
-                    )
-                };
                 Line::from(vec![
                     Span::styled(format!(" {fields} · "), Style::default().fg(Color::Gray)),
-                    visibility,
+                    visibility(self.show_values, self.revealed.len()),
                     Span::raw(" "),
                 ])
             }
@@ -526,10 +495,15 @@ impl DetailViewComponent {
             .map(|key| {
                 let value = self.secret.get(key).map(display_value).unwrap_or_default();
 
-                let (text, value_style) = if !self.is_revealed(key) {
-                    (self.mask_value(&value), Style::default().fg(Color::White))
-                } else if value.is_empty() {
+                let (text, value_style) = if value.is_empty() {
                     ("(empty)".to_string(), Style::default().fg(Color::DarkGray))
+                } else if !self.is_revealed(key) {
+                    // The same placeholder for every value: neither its
+                    // characters nor its length are on screen
+                    (
+                        masked(&value).to_string(),
+                        Style::default().fg(Color::White),
+                    )
                 } else {
                     // One row per field: the first line, and how much more
                     // there is. Enter shows the whole value.
@@ -1012,32 +986,49 @@ mod tests {
         assert!(!view.show_values);
     }
 
-    #[test]
-    fn test_mask_value() {
-        let secret = SecretData::new();
-        let view = DetailViewComponent::new(secret, "/secret/test".to_string());
-
-        assert_eq!(view.mask_value(""), "(empty)");
-        assert_eq!(view.mask_value("a"), "•");
-        assert_eq!(view.mask_value("ab"), "••");
-        assert_eq!(view.mask_value("abc"), "•••");
-        assert_eq!(view.mask_value("abcd"), "••••");
-        assert_eq!(view.mask_value("abcde"), "a•••e");
-        assert_eq!(view.mask_value("password123"), "p•••••••••3");
+    /// What is to the right of the key column, for the field named `key`
+    fn value_cell<'a>(screen: &'a str, key: &str) -> &'a str {
+        let row = screen
+            .lines()
+            .find(|line| line.contains(&format!(" {key} ")))
+            .unwrap_or_else(|| panic!("no row for {key}\n{screen}"));
+        let (_, value) = row.split_once(" │ ").expect("a key and a value");
+        value.trim_end_matches('│').trim_end()
     }
 
     #[test]
-    fn test_mask_value_non_ascii() {
-        // Regression: byte slicing panicked on any multi-byte character at
-        // either end of the value, crashing the app on preview.
-        let view = DetailViewComponent::new(SecretData::new(), "/secret/test".to_string());
+    fn masked_values_all_look_the_same() {
+        // Regression: a masked value showed its first and last character
+        // and one dot per character, so its length could be read off the
+        // screen. A non-ASCII value crashed the mask (it sliced by byte).
+        let mut view = view_of(json!({
+            "a_short": "x",
+            "b_long": "correct-horse-battery-staple-0123456789",
+            "c_lines": "first line\nsecond line",
+            "d_unicode": "пароль✓🔑",
+            "e_number": 5432,
+            "f_empty": "",
+        }));
 
-        assert_eq!(view.mask_value("rotated-ünï✓"), "r••••••••••✓");
-        assert_eq!(view.mask_value("пароль123"), "п•••••••3");
-        assert_eq!(view.mask_value("pass€"), "p•••€");
-        assert_eq!(view.mask_value("✓✓✓✓"), "••••");
-        assert_eq!(view.mask_value("é"), "•");
-        assert_eq!(view.mask_value("🔑secret🔑"), "🔑••••••🔑");
+        let screen = rendered(&mut view, 70, 12);
+        for key in ["a_short", "b_long", "c_lines", "d_unicode", "e_number"] {
+            assert_eq!(value_cell(&screen, key), "••••••••", "{key}\n{screen}");
+        }
+        assert_eq!(value_cell(&screen, "f_empty"), "(empty)", "{screen}");
+        for leaked in [
+            "correct",
+            "789",
+            "first",
+            "+1 lines",
+            "пароль",
+            "🔑",
+            "5432",
+        ] {
+            assert!(
+                !screen.contains(leaked),
+                "{leaked:?} is on screen\n{screen}"
+            );
+        }
     }
 
     #[test]

@@ -208,6 +208,8 @@ const EDIT: &[Binding] = &[
     bind("r", "rename", "Rename the selected key", 3),
     bind("a", "add", "Add a field", 2),
     bind("d", "delete", "Delete the selected field", 3),
+    bind("Space", "peek", "Reveal or hide the selected value", 5),
+    bind("v", "show all", "Reveal or hide every value", 6),
     bind("Ctrl+s", "save", "Save the secret to Vault", 1),
     bind(
         "Esc",

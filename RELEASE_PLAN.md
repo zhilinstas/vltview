@@ -109,8 +109,10 @@ Behaviour changes to put in the changelog:
       Settled with step 4: Esc returns to the list, and the pane shows
       whatever the cursor is on
 - [x] Long field/version lists have no scrolling. Fixed with step 4
-- [ ] Masking shows the first and last character and the exact length; the
-      edit view shows every value in clear
+- [x] Masking shows the first and last character and the exact length; the
+      edit view shows every value in clear. Fixed: every masked value is the
+      same eight dots, and the editor masks its list too, with the same
+      reveal keys (Space, `v`)
 - [ ] False "token provided via command-line argument" warning when the token
       comes from `VAULT_TOKEN`
 - [ ] Audit log entries drop their structured fields (no path, no action), and
@@ -303,7 +305,7 @@ How it was done, where that is not obvious from the item:
 - U13: `src/tui/keymap.rs` holds the hints for every context. The key
   dispatch is still in each component's `handle_key`, so a changed binding
   has to be changed in both places.
-- U16: masking itself is unchanged (see step 3).
+- U16: masking itself was changed later, with step 3.
 - U17: `q` no longer quits from inside the editor. The discard confirmation
   came later, with step 3.
 

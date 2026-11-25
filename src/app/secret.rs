@@ -16,6 +16,19 @@ pub fn display_value(value: &Value) -> String {
     }
 }
 
+/// What every masked value looks like.
+///
+/// It is the same for all of them: a mask that keeps a character, or has
+/// one dot per character, tells someone looking at the screen how long the
+/// value is and how it starts and ends.
+pub const MASK: &str = "••••••••";
+
+/// How a value is shown while it is masked. An empty value has nothing to
+/// hide and stays empty, so that "no value" can be told from "hidden".
+pub fn masked(text: &str) -> &'static str {
+    if text.is_empty() { "" } else { MASK }
+}
+
 /// Name of a value's JSON type, for messages
 pub fn json_type_name(value: &Value) -> &'static str {
     match value {
@@ -127,5 +140,28 @@ mod tests {
         // A typo must not silently turn the value into a string
         assert!(edit("5433a", &port).is_err());
         assert!(edit(r#"["a","b"3"#, &json!(["a", "b"])).is_err());
+    }
+
+    #[test]
+    fn a_masked_value_gives_away_neither_characters_nor_length() {
+        // Regression: the mask kept the first and last character and had
+        // one dot per character in between.
+        let values = [
+            "a",
+            "abcd",
+            "password123",
+            "a-very-long-value-that-goes-on-and-on-0123456789",
+            "line one\nline two\nline three",
+            "пароль✓",
+            "🔑secret🔑",
+            " ",
+        ];
+        for value in values {
+            assert_eq!(masked(value), MASK, "{value:?}");
+        }
+        assert!(MASK.chars().all(|c| c == '•'));
+
+        // Nothing to hide, and "no value" is worth seeing
+        assert_eq!(masked(""), "");
     }
 }

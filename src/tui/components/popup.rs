@@ -45,6 +45,24 @@ pub fn selection_style(focused: bool) -> Style {
     }
 }
 
+/// Whether values are masked, for the bottom border of a pane that shows
+/// them. Anything in clear is said in red.
+pub fn visibility(show_all: bool, revealed: usize) -> Span<'static> {
+    if show_all {
+        Span::styled(
+            "values VISIBLE",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )
+    } else if revealed == 0 {
+        Span::styled("values masked", Style::default().fg(Color::Green))
+    } else {
+        Span::styled(
+            format!("{revealed} revealed"),
+            Style::default().fg(Color::Red),
+        )
+    }
+}
+
 /// Current frame of the activity spinner
 pub fn spinner_frame() -> &'static str {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
