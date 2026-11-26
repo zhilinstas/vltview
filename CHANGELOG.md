@@ -127,6 +127,9 @@ behaviour" before upgrading: several keys do something different from 0.2.4.
 
 - Tool versions are pinned in `mise.toml`; `mise run ci` is what CI runs
   (format, clippy with warnings as errors and no exemptions, tests, audit).
+- The Makefile is gone: every command is a mise task (`mise tasks` lists
+  them). `make docker-up` is `mise run docker:up`, `make run-with-docker` is
+  `mise run docker:run`.
 - All dependencies were updated; `cargo audit` went from 22 advisories to 0.
 - The release workflow creates the release with the `gh` CLI, and every
   GitHub Action is pinned by commit.

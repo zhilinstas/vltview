@@ -57,7 +57,7 @@ echo ""
 # of whatever was edited in the meantime.
 if vault kv metadata get secret/myapp/database > /dev/null 2>&1; then
     echo "${GREEN}✓${NC} The sample data is already there, nothing to do."
-    echo "  To start again from the sample data: make docker-down && make docker-up"
+    echo "  To start again from the sample data: mise run docker:down && mise run docker:up"
     exit 0
 fi
 

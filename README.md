@@ -250,23 +250,28 @@ vltview --debug
 
 ### Docker Development Environment
 
-Needs Docker with Compose and `make`. From a fresh clone:
+Needs Docker with Compose and [mise](https://mise.jdx.dev). From a fresh
+clone:
 
 ```bash
-make docker-up          # start a dev Vault and fill it with sample data
-make run-with-docker    # the same, then run vltview in the sample folder /myapp
-make docker-down        # stop and remove the containers
+mise install            # the pinned Rust toolchain
+mise run docker:up      # start a dev Vault and fill it with sample data
+mise run docker:run     # the same, then run vltview in the sample folder /myapp
+mise run docker:down    # stop and remove the containers
 ```
 
-`make docker-up` starts Vault in dev mode at `http://localhost:8200` (token
+`mise run docker:run /company` opens another folder. `mise tasks` lists the
+other tasks (build, test, lint, logs of the containers, ...).
+
+`mise run docker:up` starts Vault in dev mode at `http://localhost:8200` (token
 `root`) and then runs `vault-init.sh` in a second container, which writes the
 sample secrets (`myapp`, `prod`, `staging`, `test`, `dev`, `company`,
-`services`) and five policies. The target waits for that step and fails if it
-fails; `make docker-logs-init` shows its output.
+`services`) and five policies. The task waits for that step and fails if it
+fails; `mise run docker:logs-init` shows its output.
 
-The dev server keeps everything in memory. `make docker-down` discards the
-data, and the next `make docker-up` writes the sample data again. While Vault
-is running, `make docker-up` leaves what is in it alone.
+The dev server keeps everything in memory. `mise run docker:down` discards
+the data, and the next `mise run docker:up` writes the sample data again.
+While Vault is running, `docker:up` leaves what is in it alone.
 
 To run against it yourself:
 

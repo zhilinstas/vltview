@@ -14,49 +14,51 @@ What it works with: the KV version 2 secrets engine mounted at `secret/` (the mo
 
 Tool versions are pinned in `mise.toml` (Rust 1.100.0 with rustfmt and clippy, cargo-audit). CI and the release workflow install from the same file via `jdx/mise-action`, so bump versions there and keep `rust-version` in `Cargo.toml` in sync. The crate uses edition 2024.
 
+Every command is a mise task, defined in `mise.toml`; there is no Makefile. `mise tasks` lists them. Arguments after a task name go to its command.
+
 ```bash
-mise install            # Install the pinned toolchain (also: make setup)
-mise run ci             # What CI runs: fmt-check, clippy -D warnings, test, audit (also: make ci)
+mise install            # Install the pinned toolchain
+mise run ci             # What CI runs: fmt-check, clippy -D warnings, test, audit
 ```
 
 ### Building
 ```bash
-make build              # Debug build
-make build-release      # Optimized release build
-make check              # Check compilation without building
+mise run build          # Debug build
+mise run build-release  # Optimized release build
+mise run check          # Check compilation without building
 ```
 
 ### Running
 ```bash
-make run                # Run with fake credentials (VAULT_ADDR=localhost:8200, VAULT_TOKEN=test-token)
-make run-debug          # Run with debug logging
-make run-with-docker    # make docker-up, then run in the sample folder /myapp (token: root)
-make dev                # Development mode with cargo watch
+mise run run            # Run with fake credentials (VAULT_ADDR=localhost:8200, VAULT_TOKEN=test-token)
+mise run run-debug      # The same, with debug logging
+mise run docker:run     # docker:up, then run in the sample folder /myapp (token: root); a path after it opens another folder
 ```
+
+Tasks that start the app have `raw = true`, which gives it the terminal; a new task that runs the UI needs it too.
 
 ### Testing
 ```bash
-make test                           # Run all tests
-make test-verbose                   # Run tests with output
-make test-specific TEST=test_name   # Run specific test
+mise run test                              # Run all tests
+mise run test some_test                    # Tests whose name contains some_test
+mise run test some_test -- --nocapture     # The same, with their output
 ```
 
 ### Code Quality
 ```bash
-make fmt           # Format code with rustfmt
-make clippy        # Run clippy linter
-make lint          # Run both fmt-check and clippy
-make audit         # Check Cargo.lock against the RustSec advisory database
-make pre-commit    # Full pre-commit check (fmt, clippy, test, build)
+mise run fmt       # Format code with rustfmt
+mise run clippy    # Clippy, warnings are errors
+mise run lint      # fmt-check and clippy
+mise run audit     # Check Cargo.lock against the RustSec advisory database
 ```
 
 ### Docker Environment
 ```bash
-make docker-up        # Start Vault dev server (token: root), seed the sample data, wait for the seed step
-make docker-down      # Stop and remove the containers (the data is in memory and goes with them)
-make docker-logs      # Follow the logs of both containers
-make docker-logs-init # Output of the seed step
-make docker-clean     # docker-down, plus volumes
+mise run docker:up        # Start Vault dev server (token: root), seed the sample data, wait for the seed step
+mise run docker:down      # Stop and remove the containers (the data is in memory and goes with them)
+mise run docker:logs      # Follow the logs of both containers
+mise run docker:logs-init # Output of the seed step
+mise run docker:clean     # docker:down, plus volumes
 ```
 
 ## Architecture
@@ -346,22 +348,22 @@ tracing::error!("Operation failed: {}", error);
 The Docker dev environment works from a fresh clone; nothing has to be run by hand after it:
 
 ```bash
-make docker-up          # Vault at http://localhost:8200, token root, with the sample data
-make run-with-docker    # the same, then: cargo run -- /myapp
+mise run docker:up      # Vault at http://localhost:8200, token root, with the sample data
+mise run docker:run     # the same, then: cargo run -- /myapp
 ```
 
 `docker-compose.yml` runs two services:
-1. `vault` (container `vltview-vault`): HashiCorp Vault in dev mode. Everything is in memory, so removing the container (`make docker-down`) discards the data
-2. `vault-init` (container `vltview-vault-init`): runs `vault-init.sh` and exits. `make docker-up` waits for it and fails if its exit status is not 0. Compose runs it again on every `make docker-up`; the script does nothing when the sample data is already there, so edits made in a running Vault are kept. For a fresh start: `make docker-down && make docker-up`
+1. `vault` (container `vltview-vault`): HashiCorp Vault in dev mode. Everything is in memory, so removing the container (`mise run docker:down`) discards the data
+2. `vault-init` (container `vltview-vault-init`): runs `vault-init.sh` and exits. `mise run docker:up` waits for it and fails if its exit status is not 0. Compose runs it again on every `docker:up`; the script does nothing when the sample data is already there, so edits made in a running Vault are kept. For a fresh start: `mise run docker:down && mise run docker:up`
 
 `vault-init.sh` creates:
 - Sample secrets under `secret/`: `myapp`, `prod`, `staging`, `dev`, `test` (with multi-line values), and the nested `company` and `services`
 - Five policies: `admin-policy`, `readonly-policy`, `dev-policy`, `prod-readonly-policy`, `myapp-policy`
 
 Rules for this environment:
-- `vault-init.sh` runs inside the Vault image, which has no bash, only busybox `sh`. Keep the script POSIX: check with `sh -n vault-init.sh` and `shellcheck -s sh vault-init.sh`, then run `make docker-up`
+- `vault-init.sh` runs inside the Vault image, which has no bash, only busybox `sh`. Keep the script POSIX: check with `sh -n vault-init.sh` and `shellcheck -s sh vault-init.sh`, then run `mise run docker:up`
 - The path given to the app is inside the KV mount: `/myapp` is `secret/myapp` in Vault. `/secret/myapp` would be `secret/secret/myapp`, which does not exist
-- The container names are fixed, so only one checkout can run the environment at a time. Stop it with `make docker-down` in the checkout that started it
+- The container names are fixed, so only one checkout can run the environment at a time. Stop it with `mise run docker:down` in the checkout that started it
 - `./docker-build.sh` builds a release binary in Ubuntu 20.04 from `Dockerfile.compat` (for older glibc) and writes it to `target/vltview`
 
 ## Async Operation Pattern
