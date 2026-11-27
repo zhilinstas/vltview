@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::event::KeyEvent;
-use ratatui::{layout::Rect, Frame};
+use ratatui::{Frame, layout::Rect};
 
 use super::action::Action;
 use super::context::{ComponentContext, RenderContext};
@@ -27,6 +27,14 @@ pub trait Component: Send {
     /// can handle specific keys and let others bubble up to the parent.
     fn handle_key(&mut self, key: KeyEvent, ctx: &ComponentContext) -> Result<Option<Action>>;
 
+    /// Handle text pasted into the terminal (bracketed paste)
+    ///
+    /// Pasted text is data, never commands: a component that has a text
+    /// input in focus inserts it there, and everything else ignores it.
+    fn handle_paste(&mut self, _text: &str, _ctx: &ComponentContext) -> Result<Option<Action>> {
+        Ok(None)
+    }
+
     /// Update component state based on an action
     ///
     /// Returns optional follow-up action. This enables action chaining where
@@ -45,46 +53,5 @@ pub trait Component: Send {
     /// propagate to other components. Used for overlays, dialogs, etc.
     fn captures_input(&self) -> bool {
         false
-    }
-
-    /// Get child components for composition
-    ///
-    /// Returns immutable slice of child components. Used for event propagation
-    /// and rendering child components.
-    fn children(&self) -> &[Box<dyn Component>] {
-        &[]
-    }
-
-    /// Get mutable child components
-    ///
-    /// Returns mutable slice of child components. Used for updating child state.
-    fn children_mut(&mut self) -> &mut [Box<dyn Component>] {
-        &mut []
-    }
-}
-
-/// Unique identifier for components (used for focus tracking)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ComponentId(pub u32);
-
-impl ComponentId {
-    /// Create a new component ID
-    pub fn new(id: u32) -> Self {
-        Self(id)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_component_id_equality() {
-        let id1 = ComponentId::new(1);
-        let id2 = ComponentId::new(1);
-        let id3 = ComponentId::new(2);
-
-        assert_eq!(id1, id2);
-        assert_ne!(id1, id3);
     }
 }

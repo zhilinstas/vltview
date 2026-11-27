@@ -165,7 +165,7 @@ case $MODE in
         sleep 2
 
         # Run the application
-        cargo run --quiet -- /secret/myapp
+        cargo run --quiet -- /myapp
 
         # Cleanup on exit
         echo ""
@@ -259,7 +259,7 @@ case $MODE in
         sleep 2
 
         # Run the application
-        cargo run --quiet -- /secret/myapp
+        cargo run --quiet -- /myapp
 
         # Cleanup
         echo ""

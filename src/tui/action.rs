@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::vault::{SecretData, WriteMode};
 
 /// All possible actions in the VltView application
 ///
@@ -10,23 +10,11 @@ pub enum Action {
     // ═══════════════════════════════════════════════════════════════
     // LIFECYCLE ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Tick event for periodic updates (e.g., log refresh)
-    Tick,
-
-    /// Request a render cycle
-    Render,
-
-    /// Terminal resized
-    Resize { width: u16, height: u16 },
-
-    /// Quit the application
+    /// `q`: quit, after asking if an edit with unsaved changes is open
     Quit,
 
-    /// Suspend terminal (Ctrl+Z support)
-    Suspend,
-
-    /// Resume from suspension
-    Resume,
+    /// Quit at once (Ctrl+C, or `q` once it is confirmed)
+    QuitNow,
 
     // ═══════════════════════════════════════════════════════════════
     // NAVIGATION ACTIONS
@@ -49,33 +37,37 @@ pub enum Action {
     /// Update UI from current state (after async operations complete)
     StateUpdated,
 
-    /// Move selection up in a list
-    SelectPrevious,
+    /// A folder was listed (async completion). `request` is the number
+    /// `Root` gave the request, so it can tell whether this listing is
+    /// still the one that is wanted.
+    FolderListed {
+        request: u64,
+        path: String,
+        items: Vec<String>,
+    },
 
-    /// Move selection down in a list
-    SelectNext,
+    /// A folder could not be listed (async completion)
+    FolderListFailed { request: u64, message: String },
 
-    /// Confirm/activate current selection
-    SelectConfirm,
+    /// The navigation cursor now rests on a different item.
+    ///
+    /// `secret` is the full path of the secret under the cursor, or `None`
+    /// when the cursor is on a folder, on `..`, or the list is empty. The
+    /// content pane always shows this selection.
+    SelectionChanged {
+        secret: Option<String>,
+        source: SelectionSource,
+    },
 
     // ═══════════════════════════════════════════════════════════════
     // FOCUS ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Switch focus to next pane
-    FocusNext,
-
-    /// Switch focus to previous pane
-    FocusPrevious,
-
     /// Focus specific pane
     FocusPane { pane: FocusedPane },
 
     // ═══════════════════════════════════════════════════════════════
     // SCREEN TRANSITION ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Switch to main screen
-    ShowMainScreen,
-
     /// Switch to policy screen
     ShowPolicyScreen,
 
@@ -100,34 +92,36 @@ pub enum Action {
     /// Show delete confirmation dialog
     ShowDeleteConfirmation { item_name: String },
 
-    /// Hide confirmation dialog
-    HideConfirmation,
-
-    /// User confirmed dialog action
-    ConfirmationAccepted,
-
-    /// User rejected dialog action
-    ConfirmationRejected,
-
     /// Show create secret input
     ShowCreateSecretInput,
-
-    /// Hide create secret input
-    HideCreateSecretInput,
 
     // ═══════════════════════════════════════════════════════════════
     // SECRET ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Load and view a secret (triggers async operation)
-    ViewSecret {
+    /// A secret was written: read it again, if the cursor is still on it.
+    /// If the cursor has left, the content pane keeps following the cursor.
+    ReloadSecret { path: String },
+
+    /// Go into the secret under the cursor: focus the content pane, loading
+    /// the secret first if it is not on screen yet
+    OpenSecret { path: String },
+
+    /// A secret could not be loaded (async completion)
+    SecretLoadFailed {
+        /// Number `Root` gave the load, as for `SecretLoaded`
+        request: u64,
         path: String,
-        should_focus: bool,
+        message: String,
     },
 
     /// Secret loaded successfully (async completion)
     SecretLoaded {
+        /// Number `Root` gave the load. Two loads of one path can be on
+        /// their way at once (the preview and the read after a save); only
+        /// the later one may be shown, whichever arrives last.
+        request: u64,
         path: String,
-        data: HashMap<String, String>,
+        data: SecretData,
         metadata: Option<SecretMetadata>,
     },
 
@@ -140,11 +134,16 @@ pub enum Action {
     /// Save current secret being edited
     SaveSecret {
         path: String,
-        data: HashMap<String, String>,
+        data: SecretData,
+        /// Whether this creates the secret or adds a version to it
+        mode: WriteMode,
     },
 
     /// Secret saved successfully
     SecretSaved { path: String },
+
+    /// A secret could not be saved (async completion)
+    SaveFailed { path: String, message: String },
 
     /// Delete a secret
     DeleteSecret { path: String },
@@ -152,77 +151,45 @@ pub enum Action {
     /// Secret deleted successfully
     SecretDeleted { path: String },
 
+    /// A secret could not be deleted (async completion). `message` is the
+    /// reason; the screen says which secret.
+    DeleteFailed { path: String, message: String },
+
     /// View specific version of secret
     ViewSecretVersion { path: String, version: u64 },
 
     /// Secret version loaded successfully (async completion)
     SecretVersionLoaded {
+        path: String,
         version: u64,
-        data: HashMap<String, String>,
+        data: SecretData,
     },
 
     /// Secret version loaded for editing (create new from old)
     VersionLoadedForEdit {
         path: String,
-        data: HashMap<String, String>,
+        version: u64,
+        data: SecretData,
     },
 
     /// Create new version from historical version
     CreateFromVersion { path: String, version: u64 },
 
-    // ═══════════════════════════════════════════════════════════════
-    // DETAIL VIEW ACTIONS
-    // ═══════════════════════════════════════════════════════════════
-    /// Toggle value visibility in detail view
-    ToggleValueVisibility,
-
-    /// Switch between data and version modes
-    ToggleDetailMode,
-
-    /// Copy selected value to clipboard
-    CopySelectedValue,
+    /// A version of a secret could not be loaded (async completion)
+    VersionLoadFailed {
+        path: String,
+        version: u64,
+        /// What it had been asked for
+        wanted_for: VersionUse,
+        message: String,
+    },
 
     // ═══════════════════════════════════════════════════════════════
     // EDIT VIEW ACTIONS
     // ═══════════════════════════════════════════════════════════════
-    /// Start editing field value
-    StartEditValue,
-
-    /// Start editing field key
-    StartEditKey,
-
-    /// Confirm current field edit
-    ConfirmEdit,
-
-    /// Cancel current edit
+    /// Esc in the edit view's field list: close the editor, after asking
+    /// if it has unsaved changes
     CancelEdit,
-
-    /// Toggle between key/value editing
-    ToggleEditTarget,
-
-    /// Add new field
-    AddField,
-
-    /// Delete selected field
-    DeleteField,
-
-    // ═══════════════════════════════════════════════════════════════
-    // FILTER ACTIONS
-    // ═══════════════════════════════════════════════════════════════
-    /// Start filter mode
-    StartFilter,
-
-    /// Update filter text
-    UpdateFilter { text: String },
-
-    /// Confirm filter and exit filter mode
-    ConfirmFilter,
-
-    /// Cancel filter (clear and exit mode)
-    CancelFilter,
-
-    /// Clear filter while keeping mode
-    ClearFilter,
 
     // ═══════════════════════════════════════════════════════════════
     // POLICY ACTIONS
@@ -239,8 +206,11 @@ pub enum Action {
     /// Policy content loaded
     PolicyLoaded { name: String, content: String },
 
-    /// Copy policy content
-    CopyPolicy,
+    /// The policy list could not be loaded (async completion)
+    PoliciesLoadFailed { message: String },
+
+    /// A policy could not be loaded (async completion)
+    PolicyLoadFailed { name: String, message: String },
 
     /// Scroll policy content
     ScrollPolicy { direction: ScrollDirection },
@@ -263,8 +233,8 @@ pub enum Action {
     /// Copy text to clipboard
     CopyToClipboard { text: String },
 
-    /// Copy operation completed
-    CopyComplete { success: bool, message: String },
+    /// Nothing was copied to the clipboard
+    CopyFailed { message: String },
 
     // ═══════════════════════════════════════════════════════════════
     // STATUS/ERROR ACTIONS
@@ -272,32 +242,14 @@ pub enum Action {
     /// Set status message
     SetStatus { message: String },
 
-    /// Clear status message
-    ClearStatus,
-
-    /// Set error message
-    SetError { message: String },
-
-    /// Clear error message
-    ClearError,
-
     /// Set loading state
     SetLoading { loading: bool },
-
-    // ═══════════════════════════════════════════════════════════════
-    // INPUT FORWARDING (for TextArea)
-    // ═══════════════════════════════════════════════════════════════
-    /// Forward key to TextArea component
-    TextInput { input: tui_textarea::Input },
 
     // ═══════════════════════════════════════════════════════════════
     // COMPOSITE/BATCH ACTIONS
     // ═══════════════════════════════════════════════════════════════
     /// Execute multiple actions in sequence
     Batch { actions: Vec<Action> },
-
-    /// No operation (useful for event handling that needs no action)
-    Noop,
 }
 
 /// Scroll direction for list and content views
@@ -315,6 +267,26 @@ pub enum ScrollDirection {
     Top,
     /// Scroll to bottom
     Bottom,
+}
+
+/// What a version of a secret was asked for
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionUse {
+    /// To be shown in the secret pane
+    View,
+    /// To be opened in the editor, as a copy to restore
+    Edit,
+}
+
+/// What moved the navigation cursor
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionSource {
+    /// A cursor key. The first step after a pause loads at once; further
+    /// steps in quick succession wait until the cursor rests.
+    Cursor,
+    /// The list changed under the cursor (reload, filter, navigation). The
+    /// load always waits until the cursor rests.
+    ListChange,
 }
 
 /// Pane focus identifiers
@@ -366,11 +338,5 @@ mod tests {
         let pane = FocusedPane::Navigation;
         assert_eq!(pane, FocusedPane::Navigation);
         assert_ne!(pane, FocusedPane::Content);
-    }
-
-    #[test]
-    fn test_action_noop() {
-        let action = Action::Noop;
-        matches!(action, Action::Noop);
     }
 }

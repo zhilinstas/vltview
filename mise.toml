@@ -1,0 +1,150 @@
+# Project toolchain and tasks, managed by mise (https://mise.jdx.dev).
+#
+#   mise install     # install everything below
+#   mise tasks       # list the tasks
+#   mise run ci      # the same checks CI runs
+#
+# Arguments after a task name are passed on to its command:
+# `mise run test some_test -- --nocapture`, `mise run docker:run /company`.
+#
+# This file is the single source of truth for tool versions: CI and the
+# release workflow install from it via jdx/mise-action. Keep `rust` here in
+# sync with `rust-version` in Cargo.toml.
+
+min_version = "2026.1.0"
+
+[tools]
+rust = { version = "1.100.0", profile = "minimal", components = "rustfmt,clippy" }
+# cargo-binstall lets mise fetch prebuilt binaries for the cargo: tools below
+# instead of compiling them from source.
+cargo-binstall = "1.26.2"
+"cargo:cargo-audit" = "0.22.2"
+
+# ── Build ────────────────────────────────────────────────────────────────
+
+[tasks.build]
+description = "Debug build"
+run = "cargo build --locked"
+
+[tasks.build-release]
+description = "Optimized release build"
+run = "cargo build --release --locked"
+
+[tasks.check]
+description = "Check that it compiles, without building"
+run = "cargo check --locked"
+
+[tasks.install]
+description = "Install the binary to ~/.cargo/bin"
+run = "cargo install --locked --path ."
+
+[tasks.clean]
+description = "Remove build artifacts"
+run = "cargo clean"
+
+[tasks.docs]
+description = "Build the API documentation and open it"
+run = "cargo doc --open"
+
+# ── Run ──────────────────────────────────────────────────────────────────
+# `raw` gives the app the terminal: it is a full-screen UI that reads keys.
+
+[tasks.run]
+description = "Run against localhost:8200 with a fake token (no Vault needed to see the start)"
+env = { VAULT_ADDR = "http://localhost:8200", VAULT_TOKEN = "test-token" }
+run = "cargo run --locked --"
+raw = true
+
+[tasks.run-debug]
+description = "The same as run, with debug logging"
+env = { VAULT_ADDR = "http://localhost:8200", VAULT_TOKEN = "test-token", RUST_LOG = "debug" }
+run = "cargo run --locked -- --debug"
+raw = true
+
+# ── Check ────────────────────────────────────────────────────────────────
+
+[tasks.fmt]
+description = "Format the code"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check formatting"
+run = "cargo fmt --all -- --check"
+
+# Unused code is an error like any other warning. Do not add an exemption or
+# an `allow` attribute for it: use the item or delete it.
+[tasks.clippy]
+description = "Lint with clippy, warnings are errors"
+run = "cargo clippy --all-targets --all-features --locked -- -D warnings"
+
+[tasks.lint]
+description = "Format check and clippy"
+depends = ["fmt-check", "clippy"]
+
+[tasks.test]
+description = "Run the test suite (a name narrows it: mise run test some_test)"
+run = "cargo test --locked"
+
+[tasks.audit]
+description = "Check Cargo.lock against the RustSec advisory database"
+run = "cargo audit"
+
+[tasks.ci]
+description = "Everything CI checks: format, lint, test, audit"
+depends = ["fmt-check", "clippy", "test", "audit"]
+
+# ── Docker dev environment ───────────────────────────────────────────────
+# Vault in dev mode at http://localhost:8200, token `root`, data in memory.
+# docker-compose.yml runs vault-init.sh in a second container to seed it.
+
+# `up -d` returns as soon as the seed container has started, so wait for it
+# to exit and fail if it did not exit with 0
+[tasks."docker:up"]
+description = "Start the dev Vault and fill it with sample secrets and policies"
+run = """
+docker compose up -d
+echo "Waiting for the sample data (vault-init.sh)..."
+status=$(docker wait vltview-vault-init)
+if [ "$status" != "0" ]; then
+  docker compose logs --tail=20 vault-init
+  echo "Seeding Vault failed (exit status $status)" >&2
+  exit 1
+fi
+echo "Vault is ready at http://localhost:8200 with the sample data (token: root)"
+"""
+
+# The path is inside the KV mount `secret/`, which the app adds itself:
+# /myapp is secret/myapp in Vault. Another path given after the task name
+# opens that folder instead.
+[tasks."docker:run"]
+description = "Start the dev Vault, then run in the sample folder /myapp"
+depends = ["docker:up"]
+env = { VAULT_ADDR = "http://localhost:8200", VAULT_TOKEN = "root" }
+usage = 'arg "[path]" default="/myapp" help="Folder to open, inside the mount secret/"'
+run = 'cargo run --locked -- "$usage_path"'
+raw = true
+
+[tasks."docker:down"]
+description = "Stop and remove the containers (the data goes with them)"
+run = "docker compose down"
+
+[tasks."docker:clean"]
+description = "docker:down, plus volumes"
+run = "docker compose down -v"
+
+[tasks."docker:logs"]
+description = "Follow the logs of both containers"
+run = "docker compose logs -f"
+
+[tasks."docker:logs-init"]
+description = "Output of the seed step"
+run = "docker compose logs vault-init"
+
+[tasks."docker:status"]
+description = "Show the state of the containers"
+run = "docker compose ps"
+
+[tasks."docker:shell"]
+description = "Open a shell in the Vault container"
+run = "docker compose exec vault /bin/sh"
+raw = true

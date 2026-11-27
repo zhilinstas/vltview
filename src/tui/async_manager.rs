@@ -1,21 +1,10 @@
+use anyhow::Result;
 use std::collections::HashMap;
 use std::future::Future;
-use anyhow::Result;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
 use super::action::Action;
-
-/// Unique identifier for async operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct OperationId(u64);
-
-impl OperationId {
-    /// Create a new operation ID
-    pub fn new(id: u64) -> Self {
-        Self(id)
-    }
-}
 
 /// Async operation manager
 ///
@@ -30,10 +19,11 @@ pub struct AsyncManager {
     action_tx: UnboundedSender<Action>,
     action_rx: UnboundedReceiver<Action>,
 
-    /// Pending operation tracking (for potential cancellation)
-    pending_ops: HashMap<OperationId, JoinHandle<()>>,
+    /// Operations that have not finished, by the number they were given.
+    /// They are aborted when the manager is dropped.
+    pending_ops: HashMap<u64, JoinHandle<()>>,
 
-    /// Next operation ID
+    /// Number the next operation gets
     next_op_id: u64,
 }
 
@@ -61,15 +51,16 @@ impl AsyncManager {
     /// # Arguments
     /// * `future` - The async operation to execute
     /// * `on_error` - Function to convert errors into actions
-    ///
-    /// # Returns
-    /// Operation ID that can be used for tracking or cancellation
-    pub fn spawn<F>(&mut self, future: F, on_error: impl Fn(anyhow::Error) -> Action + Send + 'static) -> OperationId
-    where
+    pub fn spawn<F>(
+        &mut self,
+        future: F,
+        on_error: impl Fn(anyhow::Error) -> Action + Send + 'static,
+    ) where
         F: Future<Output = Result<Action>> + Send + 'static,
     {
         let tx = self.action_tx.clone();
-        let op_id = self.allocate_op_id();
+        let op_id = self.next_op_id;
+        self.next_op_id = self.next_op_id.wrapping_add(1);
 
         let handle = self.runtime.spawn(async move {
             match future.await {
@@ -83,9 +74,7 @@ impl AsyncManager {
         });
 
         self.pending_ops.insert(op_id, handle);
-        op_id
     }
-
 
     /// Poll for completed actions
     ///
@@ -105,6 +94,19 @@ impl AsyncManager {
         actions
     }
 
+    /// Whether any operation is still running
+    pub fn has_pending(&self) -> bool {
+        self.pending_ops
+            .values()
+            .any(|handle| !handle.is_finished())
+    }
+
+    /// Number of operations spawned so far
+    #[cfg(test)]
+    pub fn spawned_count(&self) -> u64 {
+        self.next_op_id
+    }
+
     /// Cancel all pending operations
     ///
     /// Useful when shutting down or switching contexts where pending operations
@@ -114,13 +116,6 @@ impl AsyncManager {
             handle.abort();
         }
     }
-
-    /// Allocate a new operation ID
-    fn allocate_op_id(&mut self) -> OperationId {
-        let id = self.next_op_id;
-        self.next_op_id = self.next_op_id.wrapping_add(1);
-        OperationId::new(id)
-    }
 }
 
 impl Drop for AsyncManager {
@@ -129,4 +124,3 @@ impl Drop for AsyncManager {
         self.cancel_all();
     }
 }
-

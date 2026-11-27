@@ -279,7 +279,11 @@ mod tests {
         }"#;
 
         let result: Result<FullSecretMetadata, _> = serde_json::from_str(json);
-        assert!(result.is_ok(), "Failed to deserialize minimal metadata: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to deserialize minimal metadata: {:?}",
+            result.err()
+        );
 
         let metadata = result.unwrap();
         assert_eq!(metadata.current_version, 1);

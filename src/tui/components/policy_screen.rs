@@ -1,16 +1,21 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
-    Frame,
+    widgets::{
+        Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState,
+    },
 };
 
 use crate::tui::action::{Action, ScrollDirection};
 use crate::tui::component::Component;
+use crate::tui::components::popup::{spinner_frame, truncate, wrap_words};
 use crate::tui::context::{ComponentContext, RenderContext};
+use crate::tui::keymap::{self, Context};
 
 /// Policy screen component for viewing Vault ACL policies
 ///
@@ -33,17 +38,28 @@ pub struct PolicyScreen {
     /// Scroll offset for policy content
     scroll_offset: usize,
 
-    /// Filter text (not yet implemented, placeholder for future)
-    filter: String,
-
-    /// Filtered policies (same as policies for now)
-    filtered_policies: Vec<String>,
-
     /// Loading state
     is_loading: bool,
 
-    /// Error message
+    /// Why there is no policy list
     error: Option<String>,
+
+    /// Result of the last copy, shown in the footer until the next key
+    status: Option<String>,
+
+    /// Something that failed (reading a policy, a copy), shown above the
+    /// footer until the next key
+    notice: Option<String>,
+
+    /// Policy that was asked for and has not arrived. Requests are not
+    /// cancelled, so a policy only opens while it is still the one awaited.
+    awaited: Option<String>,
+
+    /// Scroll state of the policy list
+    list_state: ListState,
+
+    /// Rows of policy content shown the last time it was drawn
+    viewport_height: usize,
 }
 
 impl PolicyScreen {
@@ -55,10 +71,13 @@ impl PolicyScreen {
             current_policy_name: None,
             policy_content: None,
             scroll_offset: 0,
-            filter: String::new(),
-            filtered_policies: Vec::new(),
             is_loading: false,
             error: None,
+            status: None,
+            notice: None,
+            awaited: None,
+            list_state: ListState::default(),
+            viewport_height: 20,
         }
     }
 
@@ -69,14 +88,7 @@ impl PolicyScreen {
 
     /// Get selected policy name (in list mode)
     pub fn selected_policy(&self) -> Option<&str> {
-        self.filtered_policies
-            .get(self.selected_index)
-            .map(|s| s.as_str())
-    }
-
-    /// Get current policy content for copying
-    pub fn current_policy_content(&self) -> Option<&str> {
-        self.policy_content.as_deref()
+        self.policies.get(self.selected_index).map(|s| s.as_str())
     }
 
     /// Move selection up (list mode)
@@ -88,7 +100,7 @@ impl PolicyScreen {
 
     /// Move selection down (list mode)
     fn move_down(&mut self) {
-        let max = self.filtered_policies.len().saturating_sub(1);
+        let max = self.policies.len().saturating_sub(1);
         if self.selected_index < max {
             self.selected_index += 1;
         }
@@ -124,36 +136,28 @@ impl PolicyScreen {
     // ═══════════════════════════════════════════════════════════════
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
-        let title = Paragraph::new(vec![
-            Line::from(vec![Span::styled(
+        // One row of text: the box around it leaves no more
+        let count = match self.policies.len() {
+            1 => "1 policy".to_string(),
+            count => format!("{count} policies"),
+        };
+        let title = Paragraph::new(Line::from(vec![
+            Span::styled(
                 "🔐 Vault Policies",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(vec![
-                Span::styled(
-                    format!("{} policies", self.filtered_policies.len()),
-                    Style::default().fg(Color::Gray),
-                ),
-                if !self.filter.is_empty() {
-                    Span::styled(
-                        format!(" (filtered: \"{}\")", self.filter),
-                        Style::default().fg(Color::Yellow),
-                    )
-                } else {
-                    Span::raw("")
-                },
-            ]),
-        ])
+            ),
+            Span::styled(format!("  {count}"), Style::default().fg(Color::Gray)),
+        ]))
         .block(Block::default().borders(Borders::ALL));
 
         frame.render_widget(title, area);
     }
 
-    fn render_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_list(&mut self, frame: &mut Frame, area: Rect) {
         if self.is_loading {
-            let loading = Paragraph::new("Loading policies...")
+            let loading = Paragraph::new(format!("{} Loading policies…", spinner_frame()))
                 .style(Style::default().fg(Color::Yellow))
                 .block(Block::default().borders(Borders::ALL).title("Policies"));
             frame.render_widget(loading, area);
@@ -161,14 +165,19 @@ impl PolicyScreen {
         }
 
         if let Some(error) = &self.error {
-            let error_widget = Paragraph::new(error.as_str())
+            // Wrapped at spaces: all of it is on screen
+            let lines: Vec<Line> = wrap_words(error, area.width.saturating_sub(4) as usize)
+                .into_iter()
+                .map(|line| Line::from(format!(" {line}")))
+                .collect();
+            let error_widget = Paragraph::new(lines)
                 .style(Style::default().fg(Color::Red))
                 .block(Block::default().borders(Borders::ALL).title("Error"));
             frame.render_widget(error_widget, area);
             return;
         }
 
-        if self.filtered_policies.is_empty() {
+        if self.policies.is_empty() {
             let empty = Paragraph::new("No policies found")
                 .style(Style::default().fg(Color::Yellow))
                 .block(Block::default().borders(Borders::ALL).title("Policies"));
@@ -177,18 +186,12 @@ impl PolicyScreen {
         }
 
         let items: Vec<ListItem> = self
-            .filtered_policies
+            .policies
             .iter()
             .enumerate()
             .map(|(i, policy)| {
-                let style = if i == self.selected_index {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
+                let _ = i;
+                let style = Style::default().fg(Color::White);
 
                 // Add icon based on common policy types
                 let icon = match policy.as_str() {
@@ -206,42 +209,45 @@ impl PolicyScreen {
             })
             .collect();
 
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Policies ({})", self.filtered_policies.len())),
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Policies ({})", self.policies.len()));
+        if let Some(name) = &self.awaited {
+            block = block.title_bottom(Line::from(Span::styled(
+                format!(" {} loading {}… ", spinner_frame(), truncate(name, 40)),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+
+        let list = List::new(items).block(block).highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         );
 
-        frame.render_widget(list, area);
+        // Stateful, so a long list scrolls with the cursor
+        self.list_state.select(Some(self.selected_index));
+        frame.render_stateful_widget(list, area, &mut self.list_state);
+    }
+
+    /// One footer line: the result of the last copy, or the key hints
+    fn render_hints(&self, frame: &mut Frame, area: Rect, context: Context, extra: String) {
+        let mut line = match &self.status {
+            Some(status) => Line::from(Span::styled(
+                status.clone(),
+                Style::default().fg(Color::Green),
+            )),
+            None => keymap::footer_line(&[context], area.width.saturating_sub(2)),
+        };
+        line.spans.insert(0, Span::raw(" "));
+        line.spans
+            .push(Span::styled(extra, Style::default().fg(Color::DarkGray)));
+        frame.render_widget(Paragraph::new(line), area);
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "↑↓/j/k",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Navigate | "),
-            Span::styled(
-                "Enter",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": View | "),
-            Span::styled(
-                "Esc",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Back"),
-        ]))
-        .block(Block::default().borders(Borders::ALL));
-
-        frame.render_widget(footer, area);
+        self.render_hints(frame, area, Context::Policies, String::new());
     }
 
     fn render_content_header(&self, frame: &mut Frame, area: Rect) {
@@ -256,23 +262,19 @@ impl PolicyScreen {
             _ => ("📄", Color::Cyan),
         };
 
-        let header = Paragraph::new(vec![
-            Line::from(vec![Span::styled(
-                format!("{} Policy Details", icon),
+        // One row of text: the box around it leaves no more
+        let header = Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{icon} Policy "),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(vec![
-                Span::styled("Name: ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    policy_name,
-                    Style::default()
-                        .fg(color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-        ])
+            ),
+            Span::styled(
+                policy_name,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+        ]))
         .block(Block::default().borders(Borders::ALL));
 
         frame.render_widget(header, area);
@@ -327,8 +329,9 @@ impl PolicyScreen {
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓"));
 
-            let mut scrollbar_state = ScrollbarState::new(total_lines.saturating_sub(viewport_height))
-                .position(self.scroll_offset);
+            let mut scrollbar_state =
+                ScrollbarState::new(total_lines.saturating_sub(viewport_height))
+                    .position(self.scroll_offset);
 
             let scrollbar_area = Rect {
                 x: area.x + area.width - 1,
@@ -342,82 +345,84 @@ impl PolicyScreen {
     }
 
     fn render_content_footer(&self, frame: &mut Frame, area: Rect) {
-        let content_lines = self.policy_content.as_ref().map(|c| c.lines().count()).unwrap_or(0);
-        let viewport_height = area.height.saturating_sub(8) as usize;
-        let scroll_info = if content_lines > viewport_height {
-            format!(" | Line {}/{}", self.scroll_offset + 1, content_lines)
+        let content_lines = self
+            .policy_content
+            .as_ref()
+            .map(|c| c.lines().count())
+            .unwrap_or(0);
+        let scroll_info = if content_lines > self.viewport_height {
+            format!("  line {}/{}", self.scroll_offset + 1, content_lines)
         } else {
             String::new()
         };
 
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "↑↓/j/k",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Scroll | "),
-            Span::styled(
-                "y",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Copy | "),
-            Span::styled(
-                "Esc",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": Back"),
-            Span::styled(
-                scroll_info,
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]))
-        .block(Block::default().borders(Borders::ALL));
-
-        frame.render_widget(footer, area);
+        self.render_hints(frame, area, Context::PolicyContent, scroll_info);
     }
 
-    fn render_list_view(&self, frame: &mut Frame, area: Rect) {
+    /// The notice, wrapped to `width` columns so that none of it is cut
+    fn notice_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.notice
+            .iter()
+            .flat_map(|notice| wrap_words(&format!("✗ {notice}"), width.saturating_sub(2) as usize))
+            .map(|line| {
+                Line::from(Span::styled(
+                    format!(" {line}"),
+                    Style::default().fg(Color::Red),
+                ))
+            })
+            .collect()
+    }
+
+    /// Header, body, notice (as many rows as it needs) and footer
+    fn layout(&self, area: Rect) -> (std::rc::Rc<[Rect]>, Vec<Line<'static>>) {
+        let notice = self.notice_lines(area.width);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Header
-                Constraint::Min(0),    // List
-                Constraint::Length(3), // Footer
+                Constraint::Length(3),                   // Header
+                Constraint::Min(0),                      // List or content
+                Constraint::Length(notice.len() as u16), // Notice
+                Constraint::Length(1),                   // Footer
             ])
             .split(area);
+        (chunks, notice)
+    }
+
+    fn render_list_view(&mut self, frame: &mut Frame, area: Rect) {
+        let (chunks, notice) = self.layout(area);
 
         self.render_header(frame, chunks[0]);
         self.render_list(frame, chunks[1]);
-        self.render_footer(frame, chunks[2]);
+        frame.render_widget(Paragraph::new(notice), chunks[2]);
+        self.render_footer(frame, chunks[3]);
     }
 
-    fn render_content_view(&self, frame: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // Header
-                Constraint::Min(0),    // Content
-                Constraint::Length(3), // Footer
-            ])
-            .split(area);
+    fn render_content_view(&mut self, frame: &mut Frame, area: Rect) {
+        let (chunks, notice) = self.layout(area);
+        frame.render_widget(Paragraph::new(notice), chunks[2]);
+
+        // Scrolling works in rows of the content area as it is on screen
+        self.viewport_height = chunks[1].height.saturating_sub(2) as usize;
+        let max_offset = self
+            .policy_content
+            .as_ref()
+            .map(|c| c.lines().count())
+            .unwrap_or(0)
+            .saturating_sub(self.viewport_height);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
 
         self.render_content_header(frame, chunks[0]);
         self.render_content(frame, chunks[1]);
-        self.render_content_footer(frame, chunks[2]);
+        self.render_content_footer(frame, chunks[3]);
     }
 }
 
-impl Component for PolicyScreen {
-    fn handle_key(&mut self, key: KeyEvent, _ctx: &ComponentContext) -> Result<Option<Action>> {
-        // Different key handling based on mode
-        if self.is_viewing_content() {
-            // Content view mode
+impl PolicyScreen {
+    /// Keys while a policy is shown
+    fn handle_content_key(&mut self, key: KeyEvent) -> Result<Option<Action>> {
+        let scroll = |direction| Ok(Some(Action::ScrollPolicy { direction }));
+
+        {
             match (key.code, key.modifiers) {
                 // Scroll
                 (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
@@ -431,8 +436,20 @@ impl Component for PolicyScreen {
                     }))
                 }
 
+                (KeyCode::PageDown, _) => scroll(ScrollDirection::PageDown),
+                (KeyCode::PageUp, _) => scroll(ScrollDirection::PageUp),
+                (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                    scroll(ScrollDirection::Top)
+                }
+                (KeyCode::End, _) | (KeyCode::Char('G'), _) => scroll(ScrollDirection::Bottom),
+
                 // Copy policy content
-                (KeyCode::Char('y'), KeyModifiers::NONE) => Ok(Some(Action::CopyPolicy)),
+                (KeyCode::Char('y'), KeyModifiers::NONE) => {
+                    Ok(self.policy_content.clone().map(|text| {
+                        self.status = Some("Policy copied to clipboard".to_string());
+                        Action::CopyToClipboard { text }
+                    }))
+                }
 
                 // Back to list
                 (KeyCode::Esc, KeyModifiers::NONE) => {
@@ -448,8 +465,12 @@ impl Component for PolicyScreen {
 
                 _ => Ok(None),
             }
-        } else {
-            // List view mode
+        }
+    }
+
+    /// Keys of the policy list
+    fn handle_list_key(&mut self, key: KeyEvent) -> Result<Option<Action>> {
+        {
             match (key.code, key.modifiers) {
                 // Navigation
                 (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
@@ -461,19 +482,37 @@ impl Component for PolicyScreen {
                     Ok(None)
                 }
 
-                // View selected policy
-                (KeyCode::Enter, KeyModifiers::NONE) => {
-                    if let Some(policy_name) = self.selected_policy() {
-                        Ok(Some(Action::ViewPolicy {
-                            name: policy_name.to_string(),
-                        }))
-                    } else {
-                        Ok(None)
-                    }
+                (KeyCode::PageDown, _) => {
+                    let last = self.policies.len().saturating_sub(1);
+                    self.selected_index = (self.selected_index + 10).min(last);
+                    Ok(None)
+                }
+                (KeyCode::PageUp, _) => {
+                    self.selected_index = self.selected_index.saturating_sub(10);
+                    Ok(None)
+                }
+                (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                    self.selected_index = 0;
+                    Ok(None)
+                }
+                (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
+                    self.selected_index = self.policies.len().saturating_sub(1);
+                    Ok(None)
                 }
 
-                // Back to main screen
-                (KeyCode::Esc, KeyModifiers::NONE) => Ok(Some(Action::ScreenBack)),
+                // View selected policy
+                (KeyCode::Enter, KeyModifiers::NONE) => {
+                    let name = self.selected_policy().map(str::to_string);
+                    self.awaited = name.clone();
+                    Ok(name.map(|name| Action::ViewPolicy { name }))
+                }
+
+                // Back to main screen; a policy on its way is not wanted
+                // any more
+                (KeyCode::Esc, KeyModifiers::NONE) => {
+                    self.awaited = None;
+                    Ok(Some(Action::ScreenBack))
+                }
 
                 // Quit
                 (KeyCode::Char('q'), KeyModifiers::NONE) => Ok(Some(Action::Quit)),
@@ -485,41 +524,79 @@ impl Component for PolicyScreen {
             }
         }
     }
+}
+
+impl Component for PolicyScreen {
+    fn handle_key(&mut self, key: KeyEvent, _ctx: &ComponentContext) -> Result<Option<Action>> {
+        // A status line and an error stay until the next key
+        self.status = None;
+        self.notice = None;
+
+        if self.is_viewing_content() {
+            self.handle_content_key(key)
+        } else {
+            let selected_before = self.selected_index;
+            let result = self.handle_list_key(key);
+            // The cursor has left the policy that was asked for
+            if self.selected_index != selected_before {
+                self.awaited = None;
+            }
+            result
+        }
+    }
 
     fn update(&mut self, action: Action, _ctx: &mut ComponentContext) -> Result<Option<Action>> {
         match action {
             // Policies loaded
             Action::PoliciesLoaded { policies } => {
-                self.policies = policies.clone();
-                self.filtered_policies = policies;
+                self.policies = policies;
                 self.selected_index = 0;
                 self.is_loading = false;
                 self.error = None;
                 Ok(None)
             }
 
-            // Policy content loaded
+            // Policy content loaded. It opens only if it is still the one
+            // the user waits for: not after Esc, and not after moving on to
+            // another policy.
             Action::PolicyLoaded { name, content } => {
-                self.current_policy_name = Some(name);
-                self.policy_content = Some(content);
-                self.scroll_offset = 0;
+                if self.awaited.take_if(|awaited| *awaited == name).is_some() {
+                    self.current_policy_name = Some(name);
+                    self.policy_content = Some(content);
+                    self.scroll_offset = 0;
+                }
+                Ok(None)
+            }
+
+            // The same goes for a policy that could not be read
+            Action::PolicyLoadFailed { name, message } => {
+                if self.awaited.take_if(|awaited| *awaited == name).is_some() {
+                    self.notice = Some(message);
+                }
+                Ok(None)
+            }
+
+            Action::CopyFailed { message } => {
+                self.status = None;
+                self.notice = Some(message);
                 Ok(None)
             }
 
             // Scroll policy content
             Action::ScrollPolicy { direction } => {
-                let viewport_height = 30; // Will be calculated from terminal size in practice
+                let viewport_height = self.viewport_height;
+                let page_steps = (viewport_height / 5).max(1);
 
                 match direction {
                     ScrollDirection::Up => self.scroll_up(),
                     ScrollDirection::Down => self.scroll_down(viewport_height),
                     ScrollDirection::PageUp => {
-                        for _ in 0..5 {
+                        for _ in 0..page_steps {
                             self.scroll_up();
                         }
                     }
                     ScrollDirection::PageDown => {
-                        for _ in 0..5 {
+                        for _ in 0..page_steps {
                             self.scroll_down(viewport_height);
                         }
                     }
@@ -542,8 +619,8 @@ impl Component for PolicyScreen {
                 Ok(None)
             }
 
-            // Set error
-            Action::SetError { message } => {
+            // There is no list to show
+            Action::PoliciesLoadFailed { message } => {
                 self.error = Some(message);
                 self.is_loading = false;
                 Ok(None)
@@ -571,6 +648,147 @@ impl Default for PolicyScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
+    use crate::config::Config;
+    use ratatui::{Terminal, backend::TestBackend};
+    use tokio::sync::mpsc::unbounded_channel;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Run `body` with a screen that lists `policies`
+    fn with_screen(policies: &[&str], body: impl FnOnce(&mut PolicyScreen, &mut ComponentContext)) {
+        let config = Config {
+            vault_addr: "http://127.0.0.1:1".to_string(),
+            vault_token: "test-token".to_string().into(),
+            ..Config::default()
+        };
+        let app = App::new(config, "/".to_string()).unwrap();
+        let (tx, _rx) = unbounded_channel();
+        let mut ctx = ComponentContext::new(&app, &tx);
+
+        let mut screen = PolicyScreen::new();
+        let loaded = Action::PoliciesLoaded {
+            policies: policies.iter().map(|p| p.to_string()).collect(),
+        };
+        screen.update(loaded, &mut ctx).unwrap();
+        body(&mut screen, &mut ctx);
+    }
+
+    /// The screen as drawn at 80x24
+    fn text(screen: &mut PolicyScreen, ctx: &ComponentContext) -> String {
+        let (width, height) = (80, 24);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let render_ctx = RenderContext::new(ctx.app, true);
+                screen.draw(frame, area, &render_ctx);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn policy_loaded(name: &str) -> Action {
+        Action::PolicyLoaded {
+            name: name.to_string(),
+            content: format!("# rules of {name}"),
+        }
+    }
+
+    #[test]
+    fn enter_asks_for_the_policy_and_shows_it_when_it_arrives() {
+        with_screen(&["admin", "readonly"], |screen, ctx| {
+            let action = screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            assert!(
+                matches!(&action, Some(Action::ViewPolicy { name }) if name == "admin"),
+                "{action:?}"
+            );
+            assert!(text(screen, ctx).contains("loading admin"));
+
+            screen.update(policy_loaded("admin"), ctx).unwrap();
+            assert!(text(screen, ctx).contains("# rules of admin"));
+        });
+    }
+
+    #[test]
+    fn a_policy_that_arrives_after_the_user_moved_on_is_not_shown() {
+        // Regression: a policy opened whenever its result arrived, whatever
+        // the user had selected since.
+        with_screen(&["admin", "readonly"], |screen, ctx| {
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            screen.handle_key(key(KeyCode::Down), ctx).unwrap();
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+
+            // The first one asked for arrives last
+            screen.update(policy_loaded("readonly"), ctx).unwrap();
+            screen.update(policy_loaded("admin"), ctx).unwrap();
+
+            let screen_text = text(screen, ctx);
+            assert!(screen_text.contains("# rules of readonly"), "{screen_text}");
+            assert!(!screen_text.contains("# rules of admin"), "{screen_text}");
+        });
+
+        // Moving the cursor away is enough
+        with_screen(&["admin", "readonly"], |screen, ctx| {
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            screen.handle_key(key(KeyCode::Down), ctx).unwrap();
+            screen.update(policy_loaded("admin"), ctx).unwrap();
+            assert!(!screen.is_viewing_content());
+        });
+    }
+
+    #[test]
+    fn a_policy_that_arrives_after_escape_does_not_open() {
+        // Regression: Enter, Esc, and the policy opened the screen's content
+        // view behind the user's back.
+        with_screen(&["admin"], |screen, ctx| {
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            let action = screen.handle_key(key(KeyCode::Esc), ctx).unwrap();
+            assert!(matches!(action, Some(Action::ScreenBack)));
+
+            screen.update(policy_loaded("admin"), ctx).unwrap();
+            assert!(!screen.is_viewing_content());
+            assert!(!text(screen, ctx).contains("# rules of admin"));
+        });
+    }
+
+    #[test]
+    fn a_policy_that_could_not_be_read_is_reported_only_while_awaited() {
+        let failed = |name: &str| Action::PolicyLoadFailed {
+            name: name.to_string(),
+            message: format!("Could not load policy '{name}': permission denied"),
+        };
+
+        with_screen(&["admin", "readonly"], |screen, ctx| {
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            screen.handle_key(key(KeyCode::Down), ctx).unwrap();
+            screen.update(failed("admin"), ctx).unwrap();
+            assert!(!text(screen, ctx).contains("permission denied"));
+
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            screen.update(failed("readonly"), ctx).unwrap();
+            let screen_text = text(screen, ctx);
+            assert!(
+                screen_text.contains("Could not load policy 'readonly': permission denied"),
+                "{screen_text}"
+            );
+            // The list is still there, and the next key clears the message
+            assert!(screen_text.contains("admin"), "{screen_text}");
+            screen.handle_key(key(KeyCode::Up), ctx).unwrap();
+            assert!(!text(screen, ctx).contains("permission denied"));
+        });
+    }
 
     #[test]
     fn test_policy_screen_creation() {
@@ -584,7 +802,6 @@ mod tests {
     fn test_navigation() {
         let mut screen = PolicyScreen::new();
         screen.policies = vec!["p1".to_string(), "p2".to_string(), "p3".to_string()];
-        screen.filtered_policies = screen.policies.clone();
 
         assert_eq!(screen.selected_index, 0);
 
@@ -612,5 +829,61 @@ mod tests {
 
         screen.clear_content();
         assert!(!screen.is_viewing_content());
+    }
+
+    #[test]
+    fn a_long_error_about_the_policy_list_is_wrapped_and_shown_whole() {
+        // Regression: the error was one line, cut at the right border.
+        with_screen(&[], |screen, ctx| {
+            let message = "Could not load the policy list: Access denied - insufficient \
+                           permissions. The token needs the list capability on sys/policies/acl \
+                           to show the policies of this Vault.";
+            let failed = Action::PoliciesLoadFailed {
+                message: message.to_string(),
+            };
+            screen.update(failed, ctx).unwrap();
+
+            crate::tui::components::popup::assert_shown_whole(&text(screen, ctx), message);
+        });
+    }
+
+    #[test]
+    fn a_long_error_about_one_policy_is_wrapped_and_shown_whole() {
+        with_screen(&["admin"], |screen, ctx| {
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            let message = "Could not load policy 'admin': Access denied - insufficient \
+                           permissions. The token needs read on sys/policies/acl/admin.";
+            let failed = Action::PolicyLoadFailed {
+                name: "admin".to_string(),
+                message: message.to_string(),
+            };
+            screen.update(failed, ctx).unwrap();
+
+            let screen_text = text(screen, ctx);
+            crate::tui::components::popup::assert_shown_whole(&screen_text, message);
+            assert!(screen_text.contains("Policies (1)"), "{screen_text}");
+        });
+    }
+
+    #[test]
+    fn an_open_policy_says_which_policy_it_is() {
+        // Regression: the header was three rows high with a border, which
+        // leaves one row, and the name was on the second line of its text.
+        with_screen(&["admin", "readonly"], |screen, ctx| {
+            screen.handle_key(key(KeyCode::Down), ctx).unwrap();
+            screen.handle_key(key(KeyCode::Enter), ctx).unwrap();
+            screen.update(policy_loaded("readonly"), ctx).unwrap();
+
+            let screen_text = text(screen, ctx);
+            let header = screen_text.lines().nth(1).unwrap();
+            assert!(header.contains("Policy readonly"), "{screen_text}");
+        });
+
+        // And the list says how many there are
+        with_screen(&["admin", "readonly"], |screen, ctx| {
+            let screen_text = text(screen, ctx);
+            let header = screen_text.lines().nth(1).unwrap();
+            assert!(header.contains("2 policies"), "{screen_text}");
+        });
     }
 }

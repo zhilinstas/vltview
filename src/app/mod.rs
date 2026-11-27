@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 pub mod filter;
 pub mod navigation;
@@ -41,11 +41,11 @@ impl App {
         let state = Arc::new(AppState::new(initial_path));
 
         // Initialize Vault client
-        let vault_client = Arc::new(VaultClient::new(config.clone())?);
+        let vault_client = Arc::new(VaultClient::new(config)?);
 
         // Initialize services
-        let navigation = NavigationController::new(Arc::clone(&state), Arc::clone(&vault_client));
-        let secret_service = SecretService::new(Arc::clone(&vault_client), Arc::clone(&state));
+        let navigation = NavigationController::new(Arc::clone(&vault_client));
+        let secret_service = SecretService::new(Arc::clone(&vault_client));
         let policy_service = PolicyService::new(Arc::clone(&vault_client));
 
         Ok(Self {
@@ -86,18 +86,15 @@ impl App {
     pub async fn initialize(&mut self) -> Result<()> {
         tracing::info!("Initializing application");
 
-        // Load initial path
-        self.navigation.refresh().await?;
-
-        Ok(())
-    }
-
-    /// Shutdown the application gracefully
-    pub async fn shutdown(&mut self) -> Result<()> {
-        tracing::info!("Shutting down application");
-
-        // Clear cache if needed
-        self.state.clear_cache();
+        // Load initial path. A failure here is fatal, so say which path
+        // could not be listed (a token without list access is a common cause).
+        let path = self.state.current_path();
+        let items = self
+            .navigation
+            .list(&path)
+            .await
+            .with_context(|| format!("Failed to list initial path '{path}'"))?;
+        self.state.reload_folder(&path, items);
 
         Ok(())
     }

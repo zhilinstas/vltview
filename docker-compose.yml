@@ -1,3 +1,6 @@
+# Dev Vault with sample data. `mise run docker:up` starts it and waits for the
+# seed step. The server runs in dev mode: everything is in memory, so the data
+# is gone when the container is removed and is seeded again on the next start.
 services:
   vault:
     image: hashicorp/vault:latest
@@ -10,9 +13,6 @@ services:
       VAULT_ADDR: "http://0.0.0.0:8200"
     cap_add:
       - IPC_LOCK
-    volumes:
-      - ./vault-data:/vault/data
-      - ./vault-init.sh:/vault-init.sh
     command: server -dev -dev-root-token-id="root"
     healthcheck:
       test: ["CMD", "vault", "status"]
@@ -32,22 +32,10 @@ services:
       VAULT_ADDR: "http://vault:8200"
       VAULT_TOKEN: "root"
     volumes:
-      - ./vault-init.sh:/vault-init.sh
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        echo "Waiting for Vault to be ready..."
-        sleep 3
-
-        # Run the comprehensive vault initialization script
-        if [ -f "/vault-init.sh" ]; then
-          chmod +x /vault-init.sh
-          /vault-init.sh
-        else
-          echo "ERROR: vault-init.sh not found!"
-          exit 1
-        fi
+      - ./vault-init.sh:/vault-init.sh:ro
+    # The image has no bash, only busybox sh; vault-init.sh is written for it.
+    # The script itself waits until Vault answers.
+    entrypoint: ["/bin/sh", "/vault-init.sh"]
     networks:
       - vltview-network
     restart: "no"
@@ -55,7 +43,3 @@ services:
 networks:
   vltview-network:
     driver: bridge
-
-volumes:
-  vault-data:
-    driver: local
